@@ -469,7 +469,7 @@ function edit(context: AppMenuContext, command: "cut" | "paste" | "selectAll") {
         element.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertFromPaste" }));
       } else document.execCommand("insertText", false, text);
     })
-    .catch(() => undefined);
+    .catch((error) => toast.add({ title: "Could not paste", description: String(error), type: "error" }));
 }
 
 function AppContextMenu({
@@ -1838,7 +1838,7 @@ function App() {
   const canCloseEditors = useCallback((sessionId?: string) => {
     const path = unsavedFile(sessionId);
     if (!path) return true;
-    setError(`Save or discard your changes to “${path}” before continuing.`);
+    setError(`Wait for saving to finish, or save/discard your changes to “${path}” before continuing.`);
     return false;
   }, []);
 
