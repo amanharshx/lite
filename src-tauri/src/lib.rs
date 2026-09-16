@@ -45,7 +45,7 @@ const MISSING_DIRECTORY: &str = "The selected folder no longer exists";
 const CODEX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 // Requests stay bounded so an app server that never answers surfaces an error instead of a stuck tab.
 const CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
+const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const CODEX_NOTIFICATION_ARGS: [&str; 6] = [
     "-c",
     r#"tui.notification_method="osc9""#,
@@ -2701,8 +2701,8 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
     for (slug, display_name, description) in [
         (
             DEEPSEEK_MODEL,
-            "DeepSeek-V4-Flash",
-            "DeepSeek V4 Flash, served by the DeepSeek API.",
+            "DeepSeek-V4.1-Flash",
+            "DeepSeek V4.1 Flash, served by the DeepSeek API.",
         ),
         (
             "deepseek-v4-pro",
@@ -2726,7 +2726,14 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
             ("max_context_window", serde_json::json!(1_048_576)),
             ("default_reasoning_level", serde_json::json!("high")),
             ("visibility", serde_json::json!("list")),
-            ("input_modalities", serde_json::json!(["text"])),
+            (
+                "input_modalities",
+                if slug == DEEPSEEK_MODEL {
+                    serde_json::json!(["text", "image"])
+                } else {
+                    serde_json::json!(["text"])
+                },
+            ),
             // Capabilities and cache keys that belong to the model this entry was cloned from.
             ("comp_hash", serde_json::Value::Null),
             ("availability_nux", serde_json::Value::Null),
@@ -2737,7 +2744,10 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
             ("supports_search_tool", serde_json::json!(false)),
             ("support_verbosity", serde_json::json!(false)),
             ("default_verbosity", serde_json::Value::Null),
-            ("supports_image_detail_original", serde_json::json!(false)),
+            (
+                "supports_image_detail_original",
+                serde_json::json!(slug == DEEPSEEK_MODEL),
+            ),
             (
                 "supports_reasoning_summary_parameter",
                 serde_json::json!(false),

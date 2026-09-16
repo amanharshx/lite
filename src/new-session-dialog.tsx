@@ -35,7 +35,7 @@ const NAME_KEY = "lite.newSession.name.v1";
 const WORKTREE_KEY = "lite.newSession.worktree.v1";
 const SSH_HOST_KEY = "lite.newSession.sshHost.v1";
 const DEEPSEEK_MODELS = [
-  { value: "deepseek-v4-flash", label: "Flash" },
+  { value: "deepseek-flash", label: "Flash" },
   { value: "deepseek-v4-pro", label: "Pro" },
 ] as const;
 type DeepSeekModel = (typeof DEEPSEEK_MODELS)[number]["value"];
@@ -672,6 +672,7 @@ export function NewSessionDialog({
                             <fieldset
                               className="ml-auto flex rounded-lg border-0 bg-background/70 p-0.5"
                               aria-labelledby="deepseek-model-label"
+                              disabled
                             >
                               {DEEPSEEK_MODELS.map((model) => (
                                 <Button
