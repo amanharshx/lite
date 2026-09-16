@@ -138,6 +138,7 @@ function renderedOutput(terminal: Terminal) {
 
 export function TerminalView({
   sessionId,
+  rootId,
   agent,
   theme,
   fontSize,
@@ -150,6 +151,7 @@ export function TerminalView({
   onRecover,
 }: {
   sessionId: string;
+  rootId: string;
   agent: Agent;
   theme: Theme;
   fontSize: number;
@@ -162,6 +164,8 @@ export function TerminalView({
   onRecover: () => Promise<void>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const rootIdRef = useRef(rootId);
+  rootIdRef.current = rootId;
   // Held in a ref so a new prompt handler never rebuilds the terminal underneath the session.
   const promptRef = useRef(onPrompt);
   promptRef.current = onPrompt;
@@ -199,6 +203,12 @@ export function TerminalView({
     if (!container) return;
     setScrolledUp(false);
 
+    const openLink = (event: MouseEvent, url: string) => {
+      event.preventDefault();
+      void invoke("open_url", { url, rootId: rootIdRef.current }).catch((reason) =>
+        console.error("Lite could not open the link:", reason),
+      );
+    };
     const terminal = new Terminal({
       // The official search addon uses xterm decorations to count and mark every match.
       allowProposedApi: true,
@@ -208,12 +218,7 @@ export function TerminalView({
       lineHeight: 1.25,
       minimumContrastRatio: 4.5,
       overviewRuler: { width: 6 },
-      linkHandler: {
-        activate: (event, url) => {
-          event.preventDefault();
-          void invoke("open_url", { url });
-        },
-      },
+      linkHandler: { activate: openLink },
       scrollback: 5000,
       theme: themes[themeRef.current],
     });
@@ -226,13 +231,7 @@ export function TerminalView({
     const searchResults = searchAddon.onDidChangeResults((result) => {
       setSearchResult(result);
     });
-    // Links go to the system browser, the way every other terminal handles them.
-    terminal.loadAddon(
-      new WebLinksAddon((event, url) => {
-        event.preventDefault();
-        void invoke("open_url", { url });
-      }),
-    );
+    terminal.loadAddon(new WebLinksAddon(openLink));
     terminal.open(container);
     const scroll = terminal.onScroll((viewportY) => setScrolledUp(viewportY < terminal.buffer.active.baseY));
     const disconnectTerminalOutput = connectTerminalOutput(sessionId, () => renderedOutput(terminal));

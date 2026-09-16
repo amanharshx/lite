@@ -3381,6 +3381,7 @@ function App() {
                           >
                             <TerminalView
                               sessionId={session.id}
+                              rootId={session.rootId}
                               agent={shellAgents.get(session.id) ?? session.agent}
                               theme={theme}
                               fontSize={terminalFontSize}
