@@ -45,7 +45,6 @@ const MISSING_DIRECTORY: &str = "The selected folder no longer exists";
 const CODEX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 // Requests stay bounded so an app server that never answers surfaces an error instead of a stuck tab.
 const CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const CODEX_NOTIFICATION_ARGS: [&str; 6] = [
     "-c",
     r#"tui.notification_method="osc9""#,
@@ -54,10 +53,11 @@ const CODEX_NOTIFICATION_ARGS: [&str; 6] = [
     "-c",
     r#"tui.terminal_title=["session-id","thread"]"#,
 ];
-const SUPPORTED_KEYS: [&str; 6] = [
+const SUPPORTED_KEYS: [&str; 7] = [
     "claude",
     "codex",
     "deepseek",
+    "zai",
     "openrouter",
     "gemini",
     "kimi",
@@ -239,31 +239,104 @@ fn set_attention_badge(app: AppHandle, count: u32) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+// A model a provider serves and Codex has no catalog entry for.
+struct CodexModel {
+    slug: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    images: bool,
+}
+
 #[derive(Clone, Copy)]
 struct CodexProvider {
     id: &'static str,
+    // The name Codex knows this provider by: the `model_providers` key, the profile file beside
+    // `config.toml`, and the value of `model_provider`. It is the spelling the provider documents, so it
+    // is not always Lite's own id.
+    codex_key: &'static str,
     name: &'static str,
     base_url: &'static str,
     env_key: &'static str,
+    // The model a launch uses when the user has chosen none.
     model: &'static str,
+    // Each thinking level Codex offers here and the wording Codex shows beside it, both as the provider
+    // itself declares them.
+    levels: &'static [(&'static str, &'static str)],
+    // How the provider measures the output it truncates, either "tokens" or "bytes".
+    truncation: &'static str,
+    models: &'static [CodexModel],
     setup_url: &'static str,
 }
 
-const CODEX_PROVIDERS: [CodexProvider; 2] = [
+const CODEX_PROVIDERS: [CodexProvider; 3] = [
     CodexProvider {
         id: "deepseek",
+        codex_key: "deepseek",
         name: "DeepSeek",
         base_url: "https://api.deepseek.com/",
         env_key: "DEEPSEEK_API_KEY",
-        model: DEEPSEEK_MODEL,
+        model: "deepseek-flash",
+        levels: &[
+            ("low", "Fast responses with lighter reasoning"),
+            ("high", "Extra high reasoning depth for complex problems"),
+            ("max", "Maximum reasoning depth for the hardest problems"),
+        ],
+        truncation: "tokens",
+        models: &[
+            CodexModel {
+                slug: "deepseek-flash",
+                display_name: "DeepSeek-V4.1-Flash",
+                description: "DeepSeek V4.1 Flash, served by the DeepSeek API.",
+                images: true,
+            },
+            CodexModel {
+                slug: "deepseek-v4-pro",
+                display_name: "DeepSeek-V4-Pro",
+                description: "DeepSeek V4 Pro, served by the DeepSeek API.",
+                images: false,
+            },
+        ],
         setup_url: "https://api-docs.deepseek.com/quick_start/agent_integrations/codex",
     },
     CodexProvider {
+        id: "zai",
+        codex_key: "ZAI",
+        name: "Z.ai",
+        base_url: "https://api.z.ai/api/v1",
+        env_key: "ZAI_API_KEY",
+        model: "glm-5.3-flash",
+        levels: &[
+            ("low", "Light reasoning"),
+            ("high", "Enhanced reasoning"),
+            ("max", "Deep reasoning"),
+        ],
+        truncation: "bytes",
+        models: &[
+            CodexModel {
+                slug: "glm-5.3",
+                display_name: "GLM-5.3",
+                description: "Z.ai GLM-5.3, served by the Z.ai API.",
+                images: false,
+            },
+            CodexModel {
+                slug: "glm-5.3-flash",
+                display_name: "GLM-5.3-Flash",
+                description: "Z.ai GLM-5.3 Flash, served by the Z.ai API.",
+                images: true,
+            },
+        ],
+        setup_url: "https://docs.z.ai/devpack/tool/codex",
+    },
+    CodexProvider {
         id: "openrouter",
+        codex_key: "openrouter",
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
         env_key: "OPENROUTER_API_KEY",
         model: "~openai/gpt-latest",
+        levels: &[],
+        truncation: "",
+        models: &[],
         setup_url: "https://openrouter.ai/docs/cookbook/coding-agents/codex-cli",
     },
 ];
@@ -2678,12 +2751,13 @@ fn refresh_user_path() {
 // bundle and not the data directory. A key is handed to a session through the environment variable its
 // CLI already reads, so nothing is copied into provider configuration.
 // Codex only knows the models in its own catalog, and it warns and guesses the limits for any other
-// one. It reads a replacement catalog from a file, so the bundled catalog is read back and the DeepSeek
-// model appended to it: cloning an entry keeps whatever shape that Codex version expects, and keeping
-// the built-in models leaves the rest of Codex working. The bundled catalog is asked for by name so a
-// launch never waits on Codex refreshing its models over the network. Every failure here returns None
-// and leaves the warning in place, because a catalog Codex cannot parse would stop it from starting.
-fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
+// one. It reads a replacement catalog from a file, so the bundled catalog is read back and this
+// provider's models appended to it: cloning an entry keeps whatever shape that Codex version expects,
+// and keeping the built-in models leaves the rest of Codex working. The bundled catalog is asked for by
+// name so a launch never waits on Codex refreshing its models over the network. Every failure here
+// returns None and leaves the warning in place, because a catalog Codex cannot parse would stop it from
+// starting.
+fn codex_catalog(app: &AppHandle, provider: &CodexProvider) -> Option<PathBuf> {
     let mut probe = Command::new(resolve_executable("codex")?);
     probe.args(["debug", "models", "--bundled"]);
     // The CLI is a Node launcher, so without the user PATH its shebang cannot find Node.
@@ -2698,41 +2772,46 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
     let models = catalog.get_mut("models")?.as_array_mut()?;
     let template = models.first()?.clone();
     let mut changed = false;
-    for (slug, display_name, description) in [
-        (
-            DEEPSEEK_MODEL,
-            "DeepSeek-V4.1-Flash",
-            "DeepSeek V4.1 Flash, served by the DeepSeek API.",
-        ),
-        (
-            "deepseek-v4-pro",
-            "DeepSeek-V4-Pro",
-            "DeepSeek V4 Pro, served by the DeepSeek API.",
-        ),
-    ] {
+    for model in provider.models {
         if models
             .iter()
-            .any(|model| model.get("slug").and_then(serde_json::Value::as_str) == Some(slug))
+            .any(|entry| entry.get("slug").and_then(serde_json::Value::as_str) == Some(model.slug))
         {
             continue;
         }
-        let mut model = template.clone();
-        let entry = model.as_object_mut()?;
+        let mut entry = template.clone();
+        let fields = entry.as_object_mut()?;
         for (key, value) in [
-            ("slug", serde_json::json!(slug)),
-            ("display_name", serde_json::json!(display_name)),
-            ("description", serde_json::json!(description)),
+            ("slug", serde_json::json!(model.slug)),
+            ("display_name", serde_json::json!(model.display_name)),
+            ("description", serde_json::json!(model.description)),
             ("context_window", serde_json::json!(1_048_576)),
             ("max_context_window", serde_json::json!(1_048_576)),
+            ("effective_context_window_percent", serde_json::json!(95)),
             ("default_reasoning_level", serde_json::json!("high")),
             ("visibility", serde_json::json!("list")),
             (
                 "input_modalities",
-                if slug == DEEPSEEK_MODEL {
+                if model.images {
                     serde_json::json!(["text", "image"])
                 } else {
                     serde_json::json!(["text"])
                 },
+            ),
+            (
+                "truncation_policy",
+                serde_json::json!({"mode": provider.truncation, "limit": 10000}),
+            ),
+            // How the provider itself declares the tools Codex offers it.
+            ("apply_patch_tool_type", serde_json::json!("freeform")),
+            ("shell_type", serde_json::json!("shell_command")),
+            ("web_search_tool_type", serde_json::json!("text")),
+            ("supports_parallel_tool_calls", serde_json::json!(true)),
+            ("supports_reasoning_summaries", serde_json::json!(true)),
+            ("default_reasoning_summary", serde_json::json!("none")),
+            (
+                "supports_image_detail_original",
+                serde_json::json!(model.images),
             ),
             // Capabilities and cache keys that belong to the model this entry was cloned from.
             ("comp_hash", serde_json::Value::Null),
@@ -2740,20 +2819,15 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
             ("upgrade", serde_json::Value::Null),
             ("tool_mode", serde_json::Value::Null),
             ("multi_agent_version", serde_json::Value::Null),
+            ("multi_agent_reasoning_effort", serde_json::Value::Null),
             ("use_responses_lite", serde_json::json!(false)),
             ("supports_search_tool", serde_json::json!(false)),
-            ("support_verbosity", serde_json::json!(false)),
-            ("default_verbosity", serde_json::Value::Null),
-            (
-                "supports_image_detail_original",
-                serde_json::json!(slug == DEEPSEEK_MODEL),
-            ),
             (
                 "supports_reasoning_summary_parameter",
                 serde_json::json!(false),
             ),
-            ("default_reasoning_summary", serde_json::json!("none")),
-            ("web_search_tool_type", serde_json::json!("text")),
+            ("support_verbosity", serde_json::json!(false)),
+            ("default_verbosity", serde_json::Value::Null),
             (
                 "include_skills_usage_instructions",
                 serde_json::json!(false),
@@ -2763,29 +2837,35 @@ fn deepseek_catalog(app: &AppHandle) -> Option<PathBuf> {
                 serde_json::json!(false),
             ),
             ("include_apps_usage_instructions", serde_json::json!(false)),
-            // DeepSeek documents parallel tool calls, and the entry states that rather than inheriting it.
-            ("supports_parallel_tool_calls", serde_json::json!(true)),
             ("additional_speed_tiers", serde_json::json!([])),
             ("service_tiers", serde_json::json!([])),
         ] {
-            if entry.contains_key(key) {
-                entry.insert(key.to_owned(), value);
+            if fields.contains_key(key) {
+                fields.insert(key.to_owned(), value);
             }
         }
-        // Reasoning levels describe DeepSeek, not the model this entry was cloned from.
-        entry.insert(
+        // Reasoning levels describe the provider, not the model this entry was cloned from.
+        fields.insert(
             "supported_reasoning_levels".to_owned(),
-            serde_json::json!([
-                {"effort": "low", "description": "Fast responses with lighter reasoning"},
-                {"effort": "high", "description": "Greater reasoning depth for complex problems"},
-                {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
-            ]),
+            serde_json::Value::Array(
+                provider
+                    .levels
+                    .iter()
+                    .map(|(effort, description)| {
+                        serde_json::json!({"effort": effort, "description": description})
+                    })
+                    .collect(),
+            ),
         );
-        models.push(model);
+        models.push(entry);
         changed = true;
     }
     changed.then_some(())?;
-    let path = app.path().app_data_dir().ok()?.join("codex-models.json");
+    let path = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join(format!("codex-models-{}.json", provider.id));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
@@ -2925,8 +3005,9 @@ fn cli_auth(app: &AppHandle, name: &str) -> Option<CliAuthMethod> {
             .then_some(CliAuthMethod::Provider),
         name if CODEX_PROVIDERS.iter().any(|provider| provider.id == name) => {
             let provider = codex_provider(Some(name))?;
-            (codex_profile_exists(app, provider.id) || codex_declares_provider(app, provider.id))
-                .then_some(CliAuthMethod::ApiKey)
+            (codex_profile_exists(app, provider.codex_key)
+                || codex_declares_provider(app, provider.codex_key))
+            .then_some(CliAuthMethod::ApiKey)
         }
         "gemini" => gemini_home(app)
             .is_ok_and(|home| home.join("oauth_creds.json").is_file())
@@ -3071,11 +3152,8 @@ fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
 // Whether Codex's own configuration states something, asked line by line so the file is never parsed
 // and never held in memory. Only section headers and key names are ever looked for; provider
 // credentials in that file are never read.
-fn codex_config_states(app: &AppHandle, stated: impl Fn(&str) -> bool) -> bool {
-    let Ok(home) = codex_home(app) else {
-        return false;
-    };
-    let Ok(file) = fs::File::open(home.join("config.toml")) else {
+fn codex_config_states(path: &Path, stated: impl Fn(&str) -> bool) -> bool {
+    let Ok(file) = fs::File::open(path) else {
         return false;
     };
     BufReader::new(file)
@@ -3085,15 +3163,26 @@ fn codex_config_states(app: &AppHandle, stated: impl Fn(&str) -> bool) -> bool {
 }
 
 fn codex_declares_provider(app: &AppHandle, provider: &str) -> bool {
+    let Ok(home) = codex_home(app) else {
+        return false;
+    };
     let header = format!("[model_providers.{provider}]");
-    codex_config_states(app, |line| line.trim() == header)
+    codex_config_states(&home.join("config.toml"), |line| line.trim() == header)
 }
 
-// A catalog is a replacement rather than a merge, so one the user configured is left to win.
-fn codex_declares_catalog(app: &AppHandle) -> bool {
-    codex_config_states(app, |line| {
-        line.trim_start().starts_with("model_catalog_json")
-    })
+// A catalog is a replacement rather than a merge, so one the user configured is left to win. A profile
+// carries its catalog only for a launch that names it, so its file is asked only then.
+fn codex_declares_catalog(app: &AppHandle, provider: &str, profile: bool) -> bool {
+    let Ok(home) = codex_home(app) else {
+        return false;
+    };
+    std::iter::once(home.join("config.toml"))
+        .chain(profile.then(|| home.join(format!("{provider}.config.toml"))))
+        .any(|path| {
+            codex_config_states(&path, |line| {
+                line.trim_start().starts_with("model_catalog_json")
+            })
+        })
 }
 
 fn codex_profile_exists(app: &AppHandle, provider: &str) -> bool {
@@ -3305,29 +3394,43 @@ fn agent_command(app: &AppHandle, launch: &SessionCommand<'_>) -> Result<Command
             if let Some(provider) = codex_provider(provider) {
                 let key = saved_api_key(app, agent, Some(provider.id)).is_some();
                 let model_selected = model.is_some();
-                let model = if provider.id == "deepseek" {
-                    match model {
-                        Some("deepseek-v4-pro") => "deepseek-v4-pro",
-                        _ => DEEPSEEK_MODEL,
+                let model = match model {
+                    Some(selected)
+                        if provider.models.iter().any(|entry| entry.slug == selected) =>
+                    {
+                        selected
                     }
-                } else {
-                    provider.model
+                    _ => provider.model,
                 };
-                let reasoning_effort = if provider.id == "deepseek" {
-                    match reasoning_effort {
-                        Some("low") => Some("low"),
-                        Some("max") => Some("max"),
-                        Some(_) => Some("high"),
-                        None => None,
+                // A thinking level this provider does not offer would be rejected, so an unknown one falls
+                // back to high.
+                let reasoning_effort = match reasoning_effort {
+                    Some(effort) if provider.levels.iter().any(|(level, _)| level == &effort) => {
+                        Some(effort)
                     }
-                } else {
-                    None
+                    Some(_) if !provider.levels.is_empty() => Some("high"),
+                    _ => None,
                 };
-                if !key && codex_profile_exists(app, provider.id) {
-                    // A profile the user wrote owns the provider and catalog; a model chosen for this
-                    // DeepSeek session still overrides its default without changing the profile.
-                    command.args(["--profile", provider.id]);
-                    if provider.id == "deepseek" && model_selected {
+                // A profile the user wrote owns the provider only for a launch that names it, which is a
+                // launch Lite holds no key for.
+                let profile = !key && codex_profile_exists(app, provider.codex_key);
+                // Without a catalog of its own Codex warns about every model it cannot find and guesses
+                // the limits, so Lite hands over one unless the user has already configured their own. A
+                // provider serving only its own default model has nothing to declare.
+                let catalog = (!provider.models.is_empty()
+                    && !codex_declares_catalog(app, provider.codex_key, profile))
+                .then(|| codex_catalog(app, &provider))
+                .flatten()
+                .map(|catalog| {
+                    // A Windows path is full of backslashes, which TOML reads as escapes.
+                    path_text(&catalog)
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                });
+                if profile {
+                    // A model chosen for this session overrides the profile's default without changing it.
+                    command.args(["--profile", provider.codex_key]);
+                    if model_selected {
                         command.args(["-c", &format!("model=\"{model}\"")]);
                     }
                 } else {
@@ -3335,33 +3438,31 @@ fn agent_command(app: &AppHandle, launch: &SessionCommand<'_>) -> Result<Command
                         // A key held by Lite defines the provider inline and is read from the
                         // environment, so no Codex configuration file has to exist or be written.
                         for override_value in [
-                            format!("model_providers.{}.name=\"{}\"", provider.id, provider.name),
+                            format!(
+                                "model_providers.{}.name=\"{}\"",
+                                provider.codex_key, provider.name
+                            ),
                             format!(
                                 "model_providers.{}.base_url=\"{}\"",
-                                provider.id, provider.base_url
+                                provider.codex_key, provider.base_url
                             ),
-                            format!("model_providers.{}.wire_api=\"responses\"", provider.id),
+                            format!(
+                                "model_providers.{}.wire_api=\"responses\"",
+                                provider.codex_key
+                            ),
                             format!(
                                 "model_providers.{}.env_key=\"{}\"",
-                                provider.id, provider.env_key
+                                provider.codex_key, provider.env_key
                             ),
                         ] {
                             command.args(["-c", &override_value]);
                         }
                     }
-                    command.args(["-c", &format!("model_provider=\"{}\"", provider.id)]);
+                    command.args(["-c", &format!("model_provider=\"{}\"", provider.codex_key)]);
                     command.args(["-c", &format!("model=\"{model}\"")]);
-                    if let Some(catalog) = (provider.id == "deepseek"
-                        && !codex_declares_catalog(app))
-                    .then(|| deepseek_catalog(app))
-                    .flatten()
-                    {
-                        // A Windows path is full of backslashes, which TOML reads as escapes.
-                        let catalog = path_text(&catalog)
-                            .replace('\\', "\\\\")
-                            .replace('"', "\\\"");
-                        command.args(["-c", &format!("model_catalog_json=\"{catalog}\"")]);
-                    }
+                }
+                if let Some(catalog) = catalog {
+                    command.args(["-c", &format!("model_catalog_json=\"{catalog}\"")]);
                 }
                 if let Some(reasoning_effort) = reasoning_effort {
                     command.args([
@@ -3463,8 +3564,8 @@ async fn agent_availability(
         && let Some(codex_provider) = codex_provider(provider.as_deref())
     {
         let configured = saved_api_key(&app, &agent, provider.as_deref()).is_some()
-            || codex_profile_exists(&app, codex_provider.id)
-            || codex_declares_provider(&app, codex_provider.id);
+            || codex_profile_exists(&app, codex_provider.codex_key)
+            || codex_declares_provider(&app, codex_provider.codex_key);
         return Ok(Availability {
             available: configured,
             installable: false,
@@ -3472,8 +3573,8 @@ async fn agent_availability(
                 String::new()
             } else {
                 format!(
-                    "Save a {} key in Lite's settings, or add a {} provider to your Codex configuration. Either way Lite launches `{}` through it.",
-                    codex_provider.name, codex_provider.name, codex_provider.model
+                    "Save a {} key in Lite's settings, or add a {} provider to your Codex configuration.",
+                    codex_provider.name, codex_provider.name
                 )
             },
         });
