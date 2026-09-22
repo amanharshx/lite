@@ -53,11 +53,12 @@ const CODEX_NOTIFICATION_ARGS: [&str; 6] = [
     "-c",
     r#"tui.terminal_title=["session-id","thread"]"#,
 ];
-const SUPPORTED_KEYS: [&str; 7] = [
+const SUPPORTED_KEYS: [&str; 8] = [
     "claude",
     "codex",
     "deepseek",
     "zai",
+    "mimo",
     "openrouter",
     "gemini",
     "kimi",
@@ -242,6 +243,8 @@ fn set_attention_badge(app: AppHandle, count: u32) -> Result<(), String> {
 // A model a provider serves and Codex has no catalog entry for.
 struct CodexModel {
     slug: &'static str,
+    // What the new-session picker calls this model, short enough to sit beside its siblings.
+    label: &'static str,
     display_name: &'static str,
     description: &'static str,
     images: bool,
@@ -257,20 +260,29 @@ struct CodexProvider {
     name: &'static str,
     base_url: &'static str,
     env_key: &'static str,
-    // The model a launch uses when the user has chosen none.
+    // The model a launch uses when the user has chosen none; `models` lists it first, so the picker and a
+    // launch agree on the default.
     model: &'static str,
     // Each thinking level Codex offers here and the wording Codex shows beside it, both as the provider
     // itself declares them.
     levels: &'static [(&'static str, &'static str)],
     // How the provider measures the output it truncates, either "tokens" or "bytes".
     truncation: &'static str,
+    // DeepSeek serves Lite its default model alone today, so its picker shows the pair but takes no choice.
+    model_choice: bool,
+    // The tool surface the provider declares: the shell tool Codex offers it, the tool mode it accepts,
+    // and whether it needs the trimmed Responses shape.
+    shell_type: &'static str,
+    tool_mode: Option<&'static str>,
+    responses_lite: bool,
     models: &'static [CodexModel],
     setup_url: &'static str,
 }
 
-const CODEX_PROVIDERS: [CodexProvider; 3] = [
+const CODEX_PROVIDERS: [CodexProvider; 4] = [
     CodexProvider {
         id: "deepseek",
+        model_choice: false,
         codex_key: "deepseek",
         name: "DeepSeek",
         base_url: "https://api.deepseek.com/",
@@ -282,15 +294,20 @@ const CODEX_PROVIDERS: [CodexProvider; 3] = [
             ("max", "Maximum reasoning depth for the hardest problems"),
         ],
         truncation: "tokens",
+        shell_type: "shell_command",
+        tool_mode: None,
+        responses_lite: false,
         models: &[
             CodexModel {
                 slug: "deepseek-flash",
+                label: "Flash",
                 display_name: "DeepSeek-V4.1-Flash",
                 description: "DeepSeek V4.1 Flash, served by the DeepSeek API.",
                 images: true,
             },
             CodexModel {
                 slug: "deepseek-v4-pro",
+                label: "Pro",
                 display_name: "DeepSeek-V4-Pro",
                 description: "DeepSeek V4 Pro, served by the DeepSeek API.",
                 images: false,
@@ -300,6 +317,7 @@ const CODEX_PROVIDERS: [CodexProvider; 3] = [
     },
     CodexProvider {
         id: "zai",
+        model_choice: true,
         codex_key: "ZAI",
         name: "Z.ai",
         base_url: "https://api.z.ai/api/v1",
@@ -311,24 +329,69 @@ const CODEX_PROVIDERS: [CodexProvider; 3] = [
             ("max", "Deep reasoning"),
         ],
         truncation: "bytes",
+        shell_type: "shell_command",
+        tool_mode: None,
+        responses_lite: false,
         models: &[
             CodexModel {
-                slug: "glm-5.3",
-                display_name: "GLM-5.3",
-                description: "Z.ai GLM-5.3, served by the Z.ai API.",
-                images: false,
-            },
-            CodexModel {
                 slug: "glm-5.3-flash",
+                label: "Flash",
                 display_name: "GLM-5.3-Flash",
                 description: "Z.ai GLM-5.3 Flash, served by the Z.ai API.",
                 images: true,
+            },
+            CodexModel {
+                slug: "glm-5.3",
+                label: "GLM-5.3",
+                display_name: "GLM-5.3",
+                description: "Z.ai GLM-5.3, served by the Z.ai API.",
+                images: false,
             },
         ],
         setup_url: "https://docs.z.ai/devpack/tool/codex",
     },
     CodexProvider {
+        id: "mimo",
+        model_choice: true,
+        codex_key: "mimo",
+        name: "Xiaomi MiMo",
+        base_url: "https://api.xiaomimimo.com/v1",
+        env_key: "MIMO_API_KEY",
+        model: "mimo-v2.6-flash",
+        levels: &[
+            ("low", "Fast responses with lighter reasoning"),
+            (
+                "medium",
+                "Balances speed and reasoning depth for everyday tasks",
+            ),
+            ("high", "Greater reasoning depth for complex problems"),
+        ],
+        truncation: "tokens",
+        // MiMo drives its tools through code and rejects custom tools outside the lite Responses shape.
+        shell_type: "unified_exec",
+        tool_mode: Some("code_mode_only"),
+        responses_lite: true,
+        models: &[
+            CodexModel {
+                slug: "mimo-v2.6-flash",
+                label: "Flash",
+                display_name: "MiMo-V2.6-Flash",
+                description: "Xiaomi MiMo-V2.6-Flash, served by the MiMo API.",
+                images: true,
+            },
+            CodexModel {
+                slug: "mimo-v2.6-pro",
+                label: "Pro",
+                display_name: "MiMo-V2.6-Pro",
+                description: "Xiaomi MiMo-V2.6-Pro, served by the MiMo API.",
+                images: true,
+            },
+        ],
+        setup_url: "https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration",
+    },
+    CodexProvider {
         id: "openrouter",
+        model_choice: false,
         codex_key: "openrouter",
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
@@ -336,6 +399,9 @@ const CODEX_PROVIDERS: [CodexProvider; 3] = [
         model: "~openai/gpt-latest",
         levels: &[],
         truncation: "",
+        shell_type: "",
+        tool_mode: None,
+        responses_lite: false,
         models: &[],
         setup_url: "https://openrouter.ai/docs/cookbook/coding-agents/codex-cli",
     },
@@ -2804,9 +2870,8 @@ fn codex_catalog(app: &AppHandle, provider: &CodexProvider) -> Option<PathBuf> {
             ),
             // How the provider itself declares the tools Codex offers it.
             ("apply_patch_tool_type", serde_json::json!("freeform")),
-            ("shell_type", serde_json::json!("shell_command")),
+            ("shell_type", serde_json::json!(provider.shell_type)),
             ("web_search_tool_type", serde_json::json!("text")),
-            ("supports_parallel_tool_calls", serde_json::json!(true)),
             ("supports_reasoning_summaries", serde_json::json!(true)),
             ("default_reasoning_summary", serde_json::json!("none")),
             (
@@ -2817,10 +2882,13 @@ fn codex_catalog(app: &AppHandle, provider: &CodexProvider) -> Option<PathBuf> {
             ("comp_hash", serde_json::Value::Null),
             ("availability_nux", serde_json::Value::Null),
             ("upgrade", serde_json::Value::Null),
-            ("tool_mode", serde_json::Value::Null),
+            ("tool_mode", serde_json::json!(provider.tool_mode)),
             ("multi_agent_version", serde_json::Value::Null),
             ("multi_agent_reasoning_effort", serde_json::Value::Null),
-            ("use_responses_lite", serde_json::json!(false)),
+            (
+                "use_responses_lite",
+                serde_json::json!(provider.responses_lite),
+            ),
             ("supports_search_tool", serde_json::json!(false)),
             (
                 "supports_reasoning_summary_parameter",
@@ -2882,6 +2950,35 @@ fn api_keys_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("api-keys.json"))
+}
+
+// The new-session picker's own view of a provider. Every model and level it can offer comes from
+// CODEX_PROVIDERS, so a slug or level the picker shows is one the catalog handed Codex already carries.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexPicker {
+    id: &'static str,
+    models: Vec<(&'static str, &'static str)>,
+    levels: Vec<&'static str>,
+    model_choice: bool,
+}
+
+#[tauri::command]
+fn codex_pickers() -> Vec<CodexPicker> {
+    CODEX_PROVIDERS
+        .iter()
+        .filter(|provider| !provider.models.is_empty())
+        .map(|provider| CodexPicker {
+            id: provider.id,
+            models: provider
+                .models
+                .iter()
+                .map(|model| (model.slug, model.label))
+                .collect(),
+            levels: provider.levels.iter().map(|(level, _)| *level).collect(),
+            model_choice: provider.model_choice,
+        })
+        .collect()
 }
 
 fn codex_provider(id: Option<&str>) -> Option<CodexProvider> {
@@ -3573,7 +3670,7 @@ async fn agent_availability(
                 String::new()
             } else {
                 format!(
-                    "Save a {} key in Lite's settings, or add a {} provider to your Codex configuration.",
+                    "Save a {} key in Lite’s settings, or add a {} provider to your Codex configuration.",
                     codex_provider.name, codex_provider.name
                 )
             },
@@ -5514,7 +5611,7 @@ fn main_checkout(git: &Path, path: &Path) -> Result<PathBuf, String> {
         return common
             .parent()
             .map(|parent| parent.to_path_buf())
-            .ok_or("The repository's git folder has no parent".into());
+            .ok_or("The repository’s git folder has no parent".into());
     }
     Ok(common)
 }
@@ -6079,7 +6176,7 @@ async fn remove_worktree(
     grant_known(&roots, &root_id)?;
     let record = worktrees_path(&app)?.join(&root_id);
     let recorded = read_worktree_record(&record)
-        .ok_or("This session's worktree is not one Lite created".to_owned())?;
+        .ok_or("This session’s worktree is not one Lite created".to_owned())?;
     let path = PathBuf::from(&recorded.path);
     let git = resolve_executable("git").unwrap_or_else(|| "git".into());
     if !path.is_dir() {
@@ -6413,7 +6510,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .check()
         .await
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "No update is available.".to_string())?;
+        .ok_or_else(|| "No update is available".to_string())?;
     // The download reports every chunk it receives, which is thousands of messages for a bar with a
     // hundred steps it can show, so only a percent the dialog has not already been given is worth
     // sending. A server that never said how large the update is says nothing rather than filling a
@@ -6534,6 +6631,7 @@ pub fn run() {
             default_directory,
             revoke_directory,
             spawn_session,
+            codex_pickers,
             record_codex_session,
             write_session,
             watch_shell_agent,

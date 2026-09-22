@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 
-import { GitHubLogomark, ProviderIcon, UltralyticsLogomark } from "@/brand-icons";
+import { GitHubLogomark, UltralyticsLogomark } from "@/brand-icons";
 import { ActionIconButton, Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -47,7 +47,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { including, without } from "@/lib/utils";
-import { AUTH_PROVIDERS, type ProviderAuth, ProviderAuthDescription } from "@/provider-auth";
+import { AUTH_PROVIDERS, type ProviderAuth, ProviderAuthDescription, ProviderRow, providerName } from "@/provider-auth";
 import {
   eventCombo,
   FIXED_SHORTCUTS,
@@ -62,7 +62,7 @@ import {
   useShortcutKeys,
 } from "@/shortcuts";
 import type { Theme } from "@/theme";
-import { type Agent, sessionLabel } from "@/types";
+import type { Agent } from "@/types";
 
 const providers = Object.values(AUTH_PROVIDERS);
 
@@ -290,7 +290,7 @@ export function SettingsDialog({
               </TabsTrigger>
               <TabsTrigger value="keys">
                 <KeyRound />
-                API Keys
+                API keys
               </TabsTrigger>
               <TabsTrigger value="files">
                 <FolderCog />
@@ -312,12 +312,12 @@ export function SettingsDialog({
                 <Item variant="outline">
                   <ItemMedia variant="icon">{theme === "dark" ? <Moon /> : <Sun />}</ItemMedia>
                   <ItemContent>
-                    <ItemTitle>Dark Mode</ItemTitle>
+                    <ItemTitle>Dark mode</ItemTitle>
                     <ItemDescription>Use Lite’s dark appearance.</ItemDescription>
                   </ItemContent>
                   <ItemActions>
                     <Switch
-                      aria-label="Dark Mode"
+                      aria-label="Dark mode"
                       checked={theme === "dark"}
                       onCheckedChange={(checked) => onThemeChange(checked ? "dark" : "light")}
                     />
@@ -328,7 +328,7 @@ export function SettingsDialog({
                     <Coffee />
                   </ItemMedia>
                   <ItemContent>
-                    <ItemTitle>Keep System Awake</ItemTitle>
+                    <ItemTitle>Keep system awake</ItemTitle>
                     <ItemDescription>
                       Prevent automatic sleep and display shutoff while a session is active.
                     </ItemDescription>
@@ -355,7 +355,7 @@ export function SettingsDialog({
                       <Bell />
                     </ItemMedia>
                     <ItemContent>
-                      <ItemTitle>macOS Notifications</ItemTitle>
+                      <ItemTitle>macOS notifications</ItemTitle>
                       <ItemDescription>Notify you when a background session is ready.</ItemDescription>
                     </ItemContent>
                     <ItemActions>
@@ -371,7 +371,7 @@ export function SettingsDialog({
               </ItemGroup>
             </TabsContent>
             <TabsContent value="keys" className="min-w-0">
-              <h2 className="text-base font-semibold">API Keys</h2>
+              <h2 className="text-base font-semibold">API keys</h2>
               <p className="mt-1 mb-4 text-sm text-muted-foreground">
                 Saved keys stay on this computer and take priority over provider sign-in.
               </p>
@@ -383,25 +383,19 @@ export function SettingsDialog({
                   const shown = revealed.has(option.id);
                   return (
                     <Item key={option.id} variant="outline">
-                      <ItemMedia variant="icon">
-                        <ProviderIcon agent={option.agent} provider={option.provider} className="size-5" />
-                      </ItemMedia>
-                      <ItemContent>
-                        <ItemTitle>{sessionLabel(option)}</ItemTitle>
+                      <ProviderRow option={option}>
                         <ProviderAuthDescription provider={option} status={status} />
-                      </ItemContent>
+                      </ProviderRow>
                       {open ? null : (
                         <ItemActions>
                           {!status?.keyHint && !status?.cliAuthMethod && option.signIn ? (
                             <Button variant="outline" size="sm" onClick={() => onSignIn(option.agent)}>
-                              {option.id === "qwen" ? "Set up" : "Sign in"}
+                              Sign in
                             </Button>
                           ) : null}
                           {"variable" in option ? (
                             <Button variant="ghost" size="sm" onClick={() => edit(option.id, true)}>
-                              {status?.keyHint || status?.cliAuthMethod === "apiKey"
-                                ? "Replace API key"
-                                : "Use API key"}
+                              {status?.keyHint ? "Replace API key" : "Use API key"}
                             </Button>
                           ) : null}
                           {status?.keyHint ? (
@@ -409,7 +403,7 @@ export function SettingsDialog({
                               size="icon-sm"
                               className="hover:text-destructive"
                               tooltip="Delete this key"
-                              aria-label={`Delete the ${option.label} key`}
+                              aria-label={`Delete the ${providerName(option)} key`}
                               disabled={busy === option.id}
                               onClick={() => void remove(option.id)}
                             >
@@ -427,7 +421,7 @@ export function SettingsDialog({
                               value={draft}
                               className="font-mono"
                               placeholder="Paste a key"
-                              aria-label={`${option.label} API key`}
+                              aria-label={`${providerName(option)} API key`}
                               onChange={(event) =>
                                 setDrafts((current) => ({ ...current, [option.id]: event.target.value }))
                               }
@@ -474,7 +468,7 @@ export function SettingsDialog({
                     <EyeOff />
                   </ItemMedia>
                   <ItemContent>
-                    <ItemTitle>Hide Hidden Files</ItemTitle>
+                    <ItemTitle>Hide hidden files</ItemTitle>
                     <ItemDescription>Hide files and folders whose names begin with a period.</ItemDescription>
                   </ItemContent>
                   <ItemActions>
@@ -489,7 +483,7 @@ export function SettingsDialog({
               </ItemGroup>
             </TabsContent>
             <TabsContent value="shortcuts" className="min-w-0">
-              <h2 className="text-base font-semibold">Keyboard Shortcuts</h2>
+              <h2 className="text-base font-semibold">Keyboard shortcuts</h2>
               <p className="mt-1 mb-2 text-sm text-muted-foreground">
                 Click a shortcut and press the keys you would rather use.
               </p>
@@ -588,7 +582,7 @@ export function SettingsDialog({
                   }}
                 >
                   <RefreshCw />
-                  Check for Updates
+                  Check for updates
                 </Button>
               </div>
             </TabsContent>

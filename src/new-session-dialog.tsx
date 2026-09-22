@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { Check, CircleAlert, Download, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 
-import { ProviderIcon } from "@/brand-icons";
 import { ActionIconButton, Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,7 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "@/components/ui/toast";
-import { AUTH_PROVIDERS, type ProviderAuth, ProviderAuthDescription } from "@/provider-auth";
+import { AUTH_PROVIDERS, type ProviderAuth, ProviderAuthDescription, ProviderRow } from "@/provider-auth";
 import { defaultSessionName, type Session, sessionLabel } from "@/types";
 
 export const SESSION_CHOICES = [
@@ -33,55 +32,21 @@ const NAME_KEY = "lite.newSession.name.v1";
 const WORKTREE_KEY = "lite.newSession.worktree.v1";
 const SSH_HOST_KEY = "lite.newSession.sshHost.v1";
 // A Codex provider serving several models offers the choice here, remembered per provider so each keeps
-// its own model and thinking level. The catalog Lite hands Codex lists the same models and a level Codex
-// was not told about would be rejected, so both stay in step with it.
-const CODEX_LEVELS = ["low", "high", "max"];
-type CodexPanel = {
-  models: readonly { value: string; label: string }[];
-  modelKey: string;
-  levelKey: string;
-  modelDisabled?: boolean;
-};
-const CODEX_PANELS: Record<string, CodexPanel> = {
-  deepseek: {
-    models: [
-      { value: "deepseek-flash", label: "Flash" },
-      { value: "deepseek-v4-pro", label: "Pro" },
-    ],
-    modelKey: "lite.newSession.deepseekModel.v1",
-    levelKey: "lite.newSession.deepseekReasoning.v1",
-    modelDisabled: true,
-  },
-  zai: {
-    models: [
-      { value: "glm-5.3-flash", label: "Flash" },
-      { value: "glm-5.3", label: "GLM-5.3" },
-    ],
-    modelKey: "lite.newSession.zaiModel.v1",
-    levelKey: "lite.newSession.zaiReasoning.v1",
-  },
-};
+// its own model and thinking level. Rust owns which models and levels exist, because the catalog it hands
+// Codex is built from the same list; this side only remembers which of them was picked.
+interface CodexPicker {
+  id: string;
+  // The provider's models, its default first, each with the name to show.
+  models: [slug: string, label: string][];
+  levels: string[];
+  modelChoice: boolean;
+}
+const modelKey = (id: string) => `lite.newSession.${id}Model.v1`;
+const levelKey = (id: string) => `lite.newSession.${id}Reasoning.v1`;
 
 function storedCodexChoice(key: string, values: readonly string[], fallback: string) {
   const stored = localStorage.getItem(key);
   return stored && values.includes(stored) ? stored : fallback;
-}
-
-// Every choice the panels remember, keyed by the storage key that holds it.
-function storedCodexChoices() {
-  return Object.fromEntries(
-    Object.values(CODEX_PANELS).flatMap((panel) => [
-      [
-        panel.modelKey,
-        storedCodexChoice(
-          panel.modelKey,
-          panel.models.map(({ value }) => value),
-          panel.models[0].value,
-        ),
-      ],
-      [panel.levelKey, storedCodexChoice(panel.levelKey, CODEX_LEVELS, "high")],
-    ]),
-  );
 }
 
 function remoteUnsupported(remote: boolean, choice: (typeof SESSION_CHOICES)[number]) {
@@ -154,7 +119,8 @@ export function NewSessionDialog({
     const stored = localStorage.getItem(CHOICE_KEY);
     return SESSION_CHOICES.find((option) => option.id === stored)?.id ?? SESSION_CHOICES[0].id;
   });
-  const [codexChoices, setCodexChoices] = useState(storedCodexChoices);
+  const [pickers, setPickers] = useState<CodexPicker[]>([]);
+  const [codexChoices, setCodexChoices] = useState<Record<string, string>>({});
   function chooseCodex(key: string, value: string) {
     localStorage.setItem(key, value);
     setCodexChoices((current) => ({ ...current, [key]: value }));
@@ -254,6 +220,29 @@ export function NewSessionDialog({
             setDirectory(selected);
             setPath(selected.path);
           }
+        })
+        .catch((reason) => {
+          if (!disposed) setError(String(reason));
+        });
+      void invoke<CodexPicker[]>("codex_pickers")
+        .then((result) => {
+          if (disposed) return;
+          setPickers(result);
+          setCodexChoices(
+            Object.fromEntries(
+              result.flatMap((picker) => [
+                [
+                  modelKey(picker.id),
+                  storedCodexChoice(
+                    modelKey(picker.id),
+                    picker.models.map(([slug]) => slug),
+                    picker.models[0][0],
+                  ),
+                ],
+                [levelKey(picker.id), storedCodexChoice(levelKey(picker.id), picker.levels, "high")],
+              ]),
+            ),
+          );
         })
         .catch((reason) => {
           if (!disposed) setError(String(reason));
@@ -365,13 +354,13 @@ export function NewSessionDialog({
         }
       }
       const name = title?.trim() ?? "";
-      const panel = CODEX_PANELS[choice.id];
+      const panel = pickers.find((picker) => picker.id === choice.id);
       onCreate({
         id: crypto.randomUUID(),
         agent: choice.agent,
         provider: choice.provider,
-        model: panel ? codexChoices[panel.modelKey] : undefined,
-        reasoningEffort: panel ? codexChoices[panel.levelKey] : undefined,
+        model: panel && codexChoices[modelKey(panel.id)],
+        reasoningEffort: panel && codexChoices[levelKey(panel.id)],
         cwd: folder.path,
         host: folder.host ?? undefined,
         rootId: folder.id,
@@ -640,7 +629,7 @@ export function NewSessionDialog({
                 {SESSION_CHOICES.map((option) => {
                   const active = choiceId === option.id;
                   const unsupported = remoteUnsupported(remote, option);
-                  const panel = CODEX_PANELS[option.id];
+                  const panel = pickers.find((picker) => picker.id === option.id);
                   const state = availability[option.id];
                   const update = updates[option.agent];
                   const managed = option.agent !== "shell" && state && !state.installable;
@@ -654,7 +643,7 @@ export function NewSessionDialog({
                       ? ({ label: "Update", working: "Updating" } as const)
                       : undefined;
                   const busy = installing === option.id;
-                  const authProvider = "configured" in option ? option : undefined;
+                  const authProvider = "signIn" in option ? option : undefined;
                   const authStatus = authProvider ? auth?.find((entry) => entry.name === authProvider.id) : undefined;
                   return (
                     <div
@@ -665,7 +654,7 @@ export function NewSessionDialog({
                         type="button"
                         size="lg"
                         variant={active && !panel ? "secondary" : active ? "ghost" : "outline"}
-                        className={`h-14 w-full min-w-0 justify-start overflow-hidden pl-3 ${action ? "pr-11" : "pr-3"} ${active && panel ? "rounded-b-none" : ""}`}
+                        className={`h-14 w-full min-w-0 justify-start overflow-hidden pl-3 ${action ? "pr-11" : "pr-3"} ${active && panel ? "rounded-b-none" : ""} ${managed && update === false ? "[&_[data-slot=item-description]_svg]:text-green-600 dark:[&_[data-slot=item-description]_svg]:text-green-400" : updatable ? "[&_[data-slot=item-description]_svg]:text-amber-600 dark:[&_[data-slot=item-description]_svg]:text-amber-400" : ""}`}
                         aria-pressed={active}
                         disabled={Boolean(installing) || unsupported}
                         title={"note" in option ? option.note : sessionLabel(option)}
@@ -677,31 +666,27 @@ export function NewSessionDialog({
                           }
                         }}
                       >
-                        <ProviderIcon agent={option.agent} provider={option.provider} className="size-5" />
-                        <div
-                          className={`min-w-0 flex-1 text-left ${managed && update === false ? "[&_[data-slot=item-description]_svg]:text-green-600 dark:[&_[data-slot=item-description]_svg]:text-green-400" : updatable ? "[&_[data-slot=item-description]_svg]:text-amber-600 dark:[&_[data-slot=item-description]_svg]:text-amber-400" : ""}`}
-                        >
-                          <span className="block truncate">{sessionLabel(option)}</span>
-                          {unsupported || remote || state === null || (state && !state.available) ? (
-                            <span className="block truncate text-xs font-normal text-muted-foreground">
-                              {unsupported
-                                ? "Local workspace only"
-                                : remote
-                                  ? `Runs on ${host.trim() || "SSH host"}`
-                                  : state === null
-                                    ? "Check failed"
-                                    : state?.installable
-                                      ? "Not installed"
-                                      : "Setup required"}
-                            </span>
+                        <ProviderRow option={option}>
+                          {unsupported ? (
+                            "Local workspace only"
+                          ) : remote ? (
+                            `Runs on ${host.trim() || "SSH host"}`
+                          ) : state === null ? (
+                            "Check failed"
+                          ) : state && !state.available ? (
+                            state.installable ? (
+                              "Not installed"
+                            ) : (
+                              "Setup required"
+                            )
                           ) : authProvider ? (
                             <ProviderAuthDescription provider={authProvider} status={authStatus} />
+                          ) : state ? (
+                            "Available"
                           ) : (
-                            <span className="block truncate text-xs font-normal text-muted-foreground">
-                              {state ? "Available" : "Checking…"}
-                            </span>
+                            "Checking…"
                           )}
-                        </div>
+                        </ProviderRow>
                       </Button>
                       {active && panel ? (
                         <div className="space-y-1 border-t px-3 py-2">
@@ -712,18 +697,18 @@ export function NewSessionDialog({
                             <fieldset
                               className="ml-auto flex rounded-lg border-0 bg-background/70 p-0.5"
                               aria-labelledby="codex-model-label"
-                              disabled={panel.modelDisabled}
+                              disabled={!panel.modelChoice}
                             >
-                              {panel.models.map((model) => (
+                              {panel.models.map(([slug, label]) => (
                                 <Button
-                                  key={model.value}
+                                  key={slug}
                                   type="button"
                                   size="xs"
-                                  variant={codexChoices[panel.modelKey] === model.value ? "secondary" : "ghost"}
-                                  aria-pressed={codexChoices[panel.modelKey] === model.value}
-                                  onClick={() => chooseCodex(panel.modelKey, model.value)}
+                                  variant={codexChoices[modelKey(panel.id)] === slug ? "secondary" : "ghost"}
+                                  aria-pressed={codexChoices[modelKey(panel.id)] === slug}
+                                  onClick={() => chooseCodex(modelKey(panel.id), slug)}
                                 >
-                                  {model.label}
+                                  {label}
                                 </Button>
                               ))}
                             </fieldset>
@@ -736,15 +721,15 @@ export function NewSessionDialog({
                               className="ml-auto flex rounded-lg border-0 bg-background/70 p-0.5"
                               aria-labelledby="codex-reasoning-label"
                             >
-                              {CODEX_LEVELS.map((effort) => (
+                              {panel.levels.map((effort) => (
                                 <Button
                                   key={effort}
                                   type="button"
                                   size="xs"
-                                  variant={codexChoices[panel.levelKey] === effort ? "secondary" : "ghost"}
+                                  variant={codexChoices[levelKey(panel.id)] === effort ? "secondary" : "ghost"}
                                   className="capitalize"
-                                  aria-pressed={codexChoices[panel.levelKey] === effort}
-                                  onClick={() => chooseCodex(panel.levelKey, effort)}
+                                  aria-pressed={codexChoices[levelKey(panel.id)] === effort}
+                                  onClick={() => chooseCodex(levelKey(panel.id), effort)}
                                 >
                                   {effort}
                                 </Button>
