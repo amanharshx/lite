@@ -1458,7 +1458,7 @@ function GitPanel({
   const [loadingUrls, setLoadingUrls] = useState(() =>
     mergeGitHubItems(
       items,
-      [...references.explicit, ...references.inferred].map((url) => ({ url })),
+      references.explicit.map((url) => ({ url })),
     ).map((item) => item.url),
   );
   const [error, setError] = useState("");
@@ -1477,11 +1477,14 @@ function GitPanel({
       const next = namedInSession(sessionId, remote);
       setReferences((current) => {
         // Alternate-screen redraws can hide earlier conversation text, so an observed reference stays
-        // with this session until the user explicitly refreshes the panel.
+        // with this session until the user explicitly refreshes the panel. An ambiguous reference is
+        // re-read instead: every repository named since widens its candidates, and each one was
+        // already asked about when it was seen.
         const explicit = [...new Set([...current.explicit, ...next.explicit])];
-        const certain = new Set(explicit);
-        const inferred = [...new Set([...current.inferred, ...next.inferred])].filter((url) => !certain.has(url));
-        return explicit.length === current.explicit.length && inferred.length === current.inferred.length
+        const certain = new Set(explicit.map(itemKey));
+        const inferred = next.inferred.filter((group) => !group.some((url) => certain.has(itemKey(url))));
+        const groups = (references: string[][]) => references.map((group) => group.join(" ")).join("\n");
+        return explicit.length === current.explicit.length && groups(inferred) === groups(current.inferred)
           ? current
           : { explicit, inferred };
       });
@@ -1498,14 +1501,17 @@ function GitPanel({
   }, [active, remote, sessionId]);
 
   // A named item belongs to the session once. Later checks update its GitHub state, but never remove it.
-  // User prose or an unqualified command first has to be confirmed as recent activity.
+  // User prose or an unqualified command first has to be confirmed as recent activity, and each check asks
+  // about every candidate, so a repository named later can still hold the most active one.
   useEffect(() => {
     const { explicit, inferred } = references;
     const visible = sessionGitHubItems(sessionId);
-    const urls = mergeGitHubItems(
+    const known = new Set(visible.map((item) => itemKey(item.url)));
+    const shown = mergeGitHubItems(
       visible,
-      [...explicit, ...inferred].map((url) => ({ url })),
+      explicit.map((url) => ({ url })),
     ).map((item) => item.url);
+    const urls = [...shown, ...inferred.flat()];
     if (!urls.length) {
       setItems([]);
       setLoadingUrls([]);
@@ -1513,14 +1519,13 @@ function GitPanel({
     }
     let disposed = false;
     setItems(visible);
-    setLoadingUrls(urls);
+    setLoadingUrls(shown);
     void invoke<GitHubItem[]>("github_items", { urls })
       .then((checked) => {
         if (!disposed) {
-          const known = new Set(visible.map((item) => itemKey(item.url)));
-          const unconfirmed = inferred.filter((url) => !known.has(itemKey(url)));
-          const updates = likelyGitHubItems(checked, unconfirmed).filter(
-            (item) => item.title !== null || !known.has(itemKey(item.url)),
+          const likely = new Set(likelyGitHubItems(checked, inferred));
+          const updates = checked.filter((item) =>
+            known.has(itemKey(item.url)) ? item.title !== null : likely.has(item),
           );
           setItems(retainGitHubItems(sessionId, updates));
         }
