@@ -1632,6 +1632,34 @@ fn shell_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
 }
 
+// Files dropped on a terminal are pasted as the platform's terminal pastes them: quoted on Windows,
+// and elsewhere with each shell special escaped, as Terminal does. Claude Code reads an image path
+// back from that escaped form but not from a single-quoted one holding an apostrophe. A path with a
+// control character is ignored: no quoting carries a newline or an escape through a paste, and an
+// escape could end a bracketed paste early and type the rest of the name as input.
+#[tauri::command]
+fn quote_dropped_paths(paths: Vec<String>) -> String {
+    let quote = |path: &String| {
+        if cfg!(windows) {
+            return shell_quote(path);
+        }
+        let mut escaped = String::with_capacity(path.len());
+        for character in path.chars() {
+            if !character.is_alphanumeric() && !"_/.,:@%+=-".contains(character) {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+        }
+        escaped
+    };
+    paths
+        .iter()
+        .filter(|path| !path.chars().any(char::is_control))
+        .map(quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn provider_home_parts(agent: &str) -> Option<(&'static str, &'static str)> {
     match agent {
         "claude" => Some(("CLAUDE_CONFIG_DIR", ".claude")),
@@ -6653,6 +6681,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             write_clipboard,
             set_attention_badge,
+            quote_dropped_paths,
             choose_directory,
             follow_directory,
             github_items,
@@ -6734,6 +6763,22 @@ mod tests {
             command.get_env("LC_CTYPE"),
             cfg!(target_os = "macos").then_some(OsStr::new("UTF-8"))
         );
+    }
+
+    #[test]
+    fn dropped_paths_skip_control_characters() {
+        let safe = quote_dropped_paths(vec!["/tmp/a b.png".into()]);
+
+        assert!(!safe.is_empty());
+        assert_eq!(
+            quote_dropped_paths(vec![
+                "/tmp/a\nb.png".into(),
+                "/tmp/a b.png".into(),
+                "/tmp/x\x1b[201~y.png".into(),
+            ]),
+            safe
+        );
+        assert_eq!(quote_dropped_paths(vec!["/tmp/\x1b[201~.png".into()]), "");
     }
 
     #[test]
