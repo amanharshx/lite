@@ -1641,7 +1641,7 @@ fn shell_quote(value: &str) -> String {
 fn quote_dropped_paths(paths: Vec<String>) -> String {
     let quote = |path: &String| {
         if cfg!(windows) {
-            return shell_quote(path);
+            return format!("{} ", shell_quote(path));
         }
         let mut escaped = String::with_capacity(path.len());
         for character in path.chars() {
@@ -1650,14 +1650,14 @@ fn quote_dropped_paths(paths: Vec<String>) -> String {
             }
             escaped.push(character);
         }
+        escaped.push(' ');
         escaped
     };
     paths
         .iter()
         .filter(|path| !path.chars().any(char::is_control))
         .map(quote)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect()
 }
 
 fn provider_home_parts(agent: &str) -> Option<(&'static str, &'static str)> {
@@ -6769,7 +6769,22 @@ mod tests {
     fn dropped_paths_skip_control_characters() {
         let safe = quote_dropped_paths(vec!["/tmp/a b.png".into()]);
 
-        assert!(!safe.is_empty());
+        assert_eq!(
+            safe,
+            if cfg!(windows) {
+                "\"/tmp/a b.png\" "
+            } else {
+                "/tmp/a\\ b.png "
+            }
+        );
+        assert_eq!(
+            quote_dropped_paths(vec!["/tmp/a b.png".into(), "/tmp/test'1.png".into()]),
+            if cfg!(windows) {
+                "\"/tmp/a b.png\" \"/tmp/test'1.png\" "
+            } else {
+                "/tmp/a\\ b.png /tmp/test\\'1.png "
+            }
+        );
         assert_eq!(
             quote_dropped_paths(vec![
                 "/tmp/a\nb.png".into(),
