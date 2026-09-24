@@ -299,9 +299,9 @@ export function TerminalView({
       if (payload.type !== "drop" || !payload.paths.length || !activeRef.current) return;
       void invoke<string>("quote_dropped_paths", { paths: payload.paths })
         .then((text) => {
-          // Nothing is left when every path was unpasteable, and the terminal may have closed or been
-          // rebuilt while the paths were quoted.
-          if (!text || terminalRef.current !== terminal) return;
+          // Nothing is left when every path was unpasteable, and the terminal may have closed, been
+          // rebuilt, or left view while the paths were quoted.
+          if (!text || terminalRef.current !== terminal || !activeRef.current) return;
           terminal.paste(text);
           terminal.focus();
         })
