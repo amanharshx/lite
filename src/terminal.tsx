@@ -1,6 +1,7 @@
 // Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
@@ -171,6 +172,8 @@ export function TerminalView({
   // Followed without a rebuild, so a shell that starts an agent is picked up.
   const agentRef = useRef(agent);
   agentRef.current = agent;
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -289,6 +292,21 @@ export function TerminalView({
     // WebKit can miss the element resize when macOS moves a window onto the built-in display after
     // an external display disconnects. The native window event reaches the same fit owner.
     const resized = getCurrentWindow().onResized(settleResize);
+    // Files dropped on the window paste their paths into the terminal in view, as a terminal app
+    // does, so an agent can pick up a dropped image. Nothing else takes a drop, and the position Tauri
+    // reports is in points on macOS and Linux but pixels on Windows, so the drop is not hit-tested.
+    const dropped = getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type !== "drop" || !payload.paths.length || !activeRef.current) return;
+      void invoke<string>("quote_dropped_paths", { paths: payload.paths })
+        .then((text) => {
+          // Nothing is left when every path was unpasteable, and the terminal may have closed, been
+          // rebuilt, or left view while the paths were quoted.
+          if (!text || terminalRef.current !== terminal || !activeRef.current) return;
+          terminal.paste(text);
+          terminal.focus();
+        })
+        .catch((reason) => console.error("Lite could not paste the dropped files:", reason));
+    });
     // Command and the zoom keys resize the type, as they do in a terminal app.
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
@@ -342,6 +360,7 @@ export function TerminalView({
       window.clearTimeout(outputRefresh);
       observer.disconnect();
       void resized.then((unlisten) => unlisten());
+      void dropped.then((unlisten) => unlisten());
       searchResults.dispose();
       scroll.dispose();
       input.dispose();
