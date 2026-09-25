@@ -10,7 +10,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -418,7 +418,66 @@ struct PtySession {
     output: Arc<Mutex<Channel<InvokeResponseBody>>>,
     run_id: String,
     alive: Arc<AtomicBool>,
+    backlog: Arc<Backlog>,
     agent_watch: Arc<AtomicU64>,
+}
+
+// Output the page has been sent but not yet drawn. Kept under the page's own replay buffer, so a
+// terminal that mounts late still draws, and so acknowledges, everything it was sent.
+const MAX_BACKLOG: usize = 512 * 1024;
+
+#[derive(Default)]
+struct Backlog {
+    bytes: Mutex<usize>,
+    drained: Condvar,
+}
+
+impl Backlog {
+    fn acknowledge(&self, count: usize) {
+        if let Ok(mut bytes) = self.bytes.lock() {
+            *bytes = bytes.saturating_sub(count);
+        }
+        self.drained.notify_one();
+    }
+
+    fn reset(&self) {
+        self.acknowledge(usize::MAX);
+    }
+
+    // Taken under the lock the reader checks liveness in, so a stop can't land between its check and
+    // its wait and be missed.
+    fn wake(&self) {
+        let _bytes = self.bytes.lock();
+        self.drained.notify_one();
+    }
+}
+
+// Reading stops while the page is behind, so a flood blocks the program on its own tty instead of
+// piling up in the page, and an interrupt is seen as soon as the page catches up.
+fn forward_output(
+    mut reader: impl Read,
+    backlog: &Backlog,
+    alive: &AtomicBool,
+    mut send: impl FnMut(&[u8]),
+) {
+    let mut buffer = [0_u8; 8192];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        // Counted before it is sent, so an acknowledgement can never arrive for bytes not yet owed.
+        let Ok(mut bytes) = backlog.bytes.lock() else {
+            break;
+        };
+        *bytes += count;
+        send(&buffer[..count]);
+        while *bytes > MAX_BACKLOG && alive.load(Ordering::Relaxed) {
+            let Ok(next) = backlog.drained.wait(bytes) else {
+                return;
+            };
+            bytes = next;
+        }
+    }
 }
 
 fn stop_pty(session: &mut PtySession) -> Result<(), String> {
@@ -435,6 +494,7 @@ fn stop_pty(session: &mut PtySession) -> Result<(), String> {
         .wait()
         .map_err(|error| kill_error.unwrap_or_else(|| error.to_string()))?;
     session.alive.store(false, Ordering::Relaxed);
+    session.backlog.wake();
     Ok(())
 }
 
@@ -4306,9 +4366,11 @@ async fn spawn_session(
                 .is_none()
             {
                 // A page that reloaded while the child ran takes over its output from here, and its
-                // run id names the events that follow, the exit included.
+                // run id names the events that follow, the exit included. Whatever the old page
+                // left undrawn is never acknowledged, so the new one starts owing nothing.
                 *session.output.lock().map_err(|error| error.to_string())? = output;
                 session.run_id = run_id;
+                session.backlog.reset();
                 return Ok(provider_session_id);
             }
             running.remove(&session_id)
@@ -4345,6 +4407,7 @@ async fn spawn_session(
 
     let output = Arc::new(Mutex::new(output));
     let alive = Arc::new(AtomicBool::new(true));
+    let backlog = Arc::new(Backlog::default());
     let pair = native_pty_system()
         .openpty(PtySize {
             rows,
@@ -4434,7 +4497,7 @@ async fn spawn_session(
         }
     };
     drop(pair.slave);
-    let mut reader = match pair.master.try_clone_reader() {
+    let reader = match pair.master.try_clone_reader() {
         Ok(reader) => reader,
         Err(error) => {
             let _ = child.kill();
@@ -4467,6 +4530,7 @@ async fn spawn_session(
             output: output.clone(),
             run_id: run_id.clone(),
             alive: Arc::clone(&alive),
+            backlog: Arc::clone(&backlog),
             agent_watch: Arc::new(AtomicU64::new(0)),
         },
     );
@@ -4479,18 +4543,13 @@ async fn spawn_session(
     thread::spawn(move || {
         // Bytes go to the page as bytes over the session's channel; an event would spell each one
         // out as a JSON number.
-        let mut buffer = [0_u8; 8192];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 {
-                break;
+        forward_output(reader, &backlog, &event_alive, |bytes| {
+            if let Ok(channel) = output.lock().map(|channel| channel.clone()) {
+                // A page reload drops its callback before the next page reattaches. Losing output
+                // during that gap must not turn into a process stop; spawn_session replaces this channel.
+                let _ = channel.send(InvokeResponseBody::Raw(bytes.to_vec()));
             }
-            let Ok(channel) = output.lock().map(|channel| channel.clone()) else {
-                break;
-            };
-            // A page reload drops its callback before the next page reattaches. Losing output during
-            // that gap must not turn into a process stop; spawn_session replaces this channel.
-            let _ = channel.send(InvokeResponseBody::Raw(buffer[..count].to_vec()));
-        }
+        });
         let completed = output_app
             .state::<Sessions>()
             .0
@@ -4756,6 +4815,17 @@ fn resize_session(
             pixel_height: 0,
         })
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn acknowledge_output(sessions: State<Sessions>, session_id: String, bytes: usize) {
+    if let Some(backlog) = sessions.0.lock().ok().and_then(|sessions| {
+        sessions
+            .get(&session_id)
+            .map(|session| Arc::clone(&session.backlog))
+    }) {
+        backlog.acknowledge(bytes);
+    }
 }
 
 #[tauri::command]
@@ -6715,6 +6785,7 @@ pub fn run() {
             write_session,
             watch_shell_agent,
             resize_session,
+            acknowledge_output,
             stop_session,
             set_keep_awake,
             delete_session_data,
@@ -6955,5 +7026,41 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
 
         assert_eq!(error, "Git status contains a non-UTF-8 path");
+    }
+
+    #[test]
+    fn output_waits_for_the_page_to_draw_what_it_was_sent() {
+        let backlog = Arc::new(Backlog::default());
+        let alive = Arc::new(AtomicBool::new(true));
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = thread::spawn({
+            let backlog = Arc::clone(&backlog);
+            let alive = Arc::clone(&alive);
+            move || {
+                forward_output(
+                    std::io::repeat(b'x').take(64 << 20),
+                    &backlog,
+                    &alive,
+                    |bytes| {
+                        let _ = sent.send(bytes.len());
+                    },
+                )
+            }
+        });
+
+        thread::sleep(Duration::from_millis(200));
+        let first: usize = received.try_iter().sum();
+        assert!(
+            first > 0 && first <= MAX_BACKLOG + 8192,
+            "sent {first} bytes nobody drew"
+        );
+
+        backlog.acknowledge(first);
+        thread::sleep(Duration::from_millis(200));
+        assert!(received.try_iter().sum::<usize>() > 0);
+
+        alive.store(false, Ordering::Relaxed);
+        backlog.wake();
+        reader.join().unwrap();
     }
 }
