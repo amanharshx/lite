@@ -465,7 +465,7 @@ fn forward_output(
         if count == 0 {
             break;
         }
-        // Counted before it is sent, so an acknowledgement can never arrive for bytes not yet owed.
+        // Counted before it is sent, so an acknowledgment can never arrive for bytes not yet owed.
         let Ok(mut bytes) = backlog.bytes.lock() else {
             break;
         };
