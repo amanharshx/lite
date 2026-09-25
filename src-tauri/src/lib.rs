@@ -465,12 +465,18 @@ fn forward_output(
         if count == 0 {
             break;
         }
-        // Counted before it is sent, so an acknowledgment can never arrive for bytes not yet owed.
+        // Counted before it is sent, so an acknowledgment can never arrive for bytes not yet owed, and
+        // released while it is sent: with Tauri's tracing feature, eval waits on the main thread,
+        // where acknowledge_output takes this lock.
         let Ok(mut bytes) = backlog.bytes.lock() else {
             break;
         };
         *bytes += count;
+        drop(bytes);
         send(&buffer[..count]);
+        let Ok(mut bytes) = backlog.bytes.lock() else {
+            break;
+        };
         while *bytes > MAX_BACKLOG && alive.load(Ordering::Relaxed) {
             let Ok(next) = backlog.drained.wait(bytes) else {
                 return;
