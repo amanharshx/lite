@@ -486,6 +486,18 @@ fn forward_output(
     }
 }
 
+// A page that reloaded while the child ran takes over its output from here. Whatever the old page
+// left undrawn is never acknowledged, so the new one starts owing nothing.
+fn reattach_output(
+    output: &Mutex<Channel<InvokeResponseBody>>,
+    backlog: &Backlog,
+    channel: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    *output.lock().map_err(|error| error.to_string())? = channel;
+    backlog.reset();
+    Ok(())
+}
+
 fn stop_pty(session: &mut PtySession) -> Result<(), String> {
     let running = session
         .child
@@ -4371,12 +4383,9 @@ async fn spawn_session(
                 .map_err(|error| error.to_string())?
                 .is_none()
             {
-                // A page that reloaded while the child ran takes over its output from here, and its
-                // run id names the events that follow, the exit included. Whatever the old page
-                // left undrawn is never acknowledged, so the new one starts owing nothing.
-                *session.output.lock().map_err(|error| error.to_string())? = output;
+                // Its run id names the events that follow, the exit included.
+                reattach_output(&session.output, &session.backlog, output)?;
                 session.run_id = run_id;
-                session.backlog.reset();
                 return Ok(provider_session_id);
             }
             running.remove(&session_id)
@@ -6848,6 +6857,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn session_locale_is_utf8_only_on_macos() {
@@ -7034,12 +7044,32 @@ mod tests {
         assert_eq!(error, "Git status contains a non-UTF-8 path");
     }
 
-    #[test]
-    fn output_waits_for_the_page_to_draw_what_it_was_sent() {
+    fn counting_channel() -> (Channel<InvokeResponseBody>, Arc<AtomicUsize>) {
+        let received = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&received);
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                count.fetch_add(bytes.len(), Ordering::Relaxed);
+            }
+            Ok(())
+        });
+        (channel, received)
+    }
+
+    // Floods a reader with far more output than the page could ever owe.
+    fn flood(
+        channel: Channel<InvokeResponseBody>,
+    ) -> (
+        Arc<Mutex<Channel<InvokeResponseBody>>>,
+        Arc<Backlog>,
+        Arc<AtomicBool>,
+        thread::JoinHandle<()>,
+    ) {
+        let output = Arc::new(Mutex::new(channel));
         let backlog = Arc::new(Backlog::default());
         let alive = Arc::new(AtomicBool::new(true));
-        let (sent, received) = std::sync::mpsc::channel();
         let reader = thread::spawn({
+            let output = Arc::clone(&output);
             let backlog = Arc::clone(&backlog);
             let alive = Arc::clone(&alive);
             move || {
@@ -7048,22 +7078,62 @@ mod tests {
                     &backlog,
                     &alive,
                     |bytes| {
-                        let _ = sent.send(bytes.len());
+                        let channel = output.lock().unwrap().clone();
+                        let _ = channel.send(InvokeResponseBody::Raw(bytes.to_vec()));
                     },
                 )
             }
         });
+        (output, backlog, alive, reader)
+    }
 
-        thread::sleep(Duration::from_millis(200));
-        let first: usize = received.try_iter().sum();
+    // Nothing acknowledges in these tests, so once a page has been sent more than the limit the
+    // reader cannot send it another byte: it has paused.
+    fn wait_past(received: &AtomicUsize, bytes: usize) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let sent = received.load(Ordering::Relaxed);
+            if sent > bytes {
+                return sent;
+            }
+            assert!(Instant::now() < deadline, "only {sent} bytes arrived");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn output_waits_for_the_page_to_draw_what_it_was_sent() {
+        let (channel, received) = counting_channel();
+        let (_output, backlog, alive, reader) = flood(channel);
+        let first = wait_past(&received, MAX_BACKLOG);
         assert!(
-            first > 0 && first <= MAX_BACKLOG + 8192,
+            first <= MAX_BACKLOG + 8192,
             "sent {first} bytes nobody drew"
         );
 
         backlog.acknowledge(first);
-        thread::sleep(Duration::from_millis(200));
-        assert!(received.try_iter().sum::<usize>() > 0);
+        wait_past(&received, first);
+
+        alive.store(false, Ordering::Relaxed);
+        backlog.wake();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn reattaching_mid_flood_moves_output_to_the_new_page() {
+        let (old, old_received) = counting_channel();
+        let (output, backlog, alive, reader) = flood(old);
+        let stalled = wait_past(&old_received, MAX_BACKLOG);
+
+        // The old page never acknowledges what it left undrawn, so only reattaching can resume.
+        let (new, new_received) = counting_channel();
+        reattach_output(&output, &backlog, new).unwrap();
+        let resumed = wait_past(&new_received, MAX_BACKLOG);
+        assert!(
+            resumed <= MAX_BACKLOG + 8192,
+            "sent {resumed} bytes to the new page"
+        );
+        assert_eq!(old_received.load(Ordering::Relaxed), stalled);
 
         alive.store(false, Ordering::Relaxed);
         backlog.wake();
