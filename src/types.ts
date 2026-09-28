@@ -14,6 +14,8 @@ export interface Session {
   // Provider model chosen when the session was created; absent for providers that own model choice.
   model?: string;
   reasoningEffort?: string;
+  // CLI flags typed when the session was created, passed again on every launch so a resume keeps them.
+  flags?: string;
   // Sign-in and rebuild commands are temporary sessions; neither is stored or resumed.
   mode?: "login" | "rebuild";
   name: string;

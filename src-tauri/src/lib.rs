@@ -3695,6 +3695,36 @@ fn session_arguments(
     }
 }
 
+// Flags the user typed for a session, split as a shell would. A flag that picks the conversation, or
+// replaces the settings and title Lite reads usage and resume from, is refused rather than passed twice.
+fn session_flags(agent: &str, flags: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(flags) = flags.filter(|_| agent != "shell") else {
+        return Ok(Vec::new());
+    };
+    let flags =
+        shell_words::split(flags).map_err(|error| format!("Could not read the flags: {error}"))?;
+    let refused = flags.iter().find(|flag| match agent {
+        "claude" => matches!(
+            flag.split('=').next().unwrap_or_default(),
+            "--resume"
+                | "-r"
+                | "--continue"
+                | "-c"
+                | "--session-id"
+                | "--settings"
+                | "--fork-session"
+        ),
+        "codex" => *flag == "resume" || flag.contains("terminal_title"),
+        _ => false,
+    });
+    match refused {
+        Some(flag) => Err(format!(
+            "{flag} conflicts with the arguments Lite passes. Remove it from the flags."
+        )),
+        None => Ok(flags),
+    }
+}
+
 fn codex_resume_arguments(provider_session_id: Option<&str>) -> Vec<String> {
     provider_session_id
         .map(|id| vec!["resume".into(), id.into()])
@@ -3915,6 +3945,7 @@ struct SessionCommand<'a> {
     provider: Option<&'a str>,
     model: Option<&'a str>,
     reasoning_effort: Option<&'a str>,
+    flags: &'a [String],
     resume: bool,
     session_id: &'a str,
     provider_session_id: Option<&'a str>,
@@ -4512,6 +4543,7 @@ fn ssh_session_command(
                 }
             }
         }
+        args.extend_from_slice(launch.flags);
         let command = args
             .iter()
             .map(|argument| posix_quote(argument))
@@ -4550,6 +4582,7 @@ struct SessionLaunch {
     provider: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    flags: Option<String>,
     mode: Option<String>,
     initial_prompt: Option<String>,
     theme: Option<String>,
@@ -4579,6 +4612,7 @@ async fn spawn_session(
         provider,
         model,
         reasoning_effort,
+        flags,
         mode,
         initial_prompt,
         theme,
@@ -4586,6 +4620,7 @@ async fn spawn_session(
         cols,
         rows,
     } = launch;
+    let flags = session_flags(&agent, flags.as_deref())?;
     let root = roots
         .0
         .lock()
@@ -4791,6 +4826,7 @@ async fn spawn_session(
         provider: provider.as_deref(),
         model: model.as_deref(),
         reasoning_effort: reasoning_effort.as_deref(),
+        flags: &flags,
         resume,
         session_id: &session_id,
         provider_session_id: provider_session_id.as_deref(),
@@ -4827,6 +4863,11 @@ async fn spawn_session(
         if let Some(prompt) = initial_prompt {
             command.arg(prompt);
         }
+    }
+    // The user's flags come last, so a `--` or a flag taking several values cannot swallow the resume
+    // id, settings, or prompt that Lite passes before them.
+    if ssh.is_none() {
+        command.args(&flags);
     }
     configure_session_command(
         &mut command,

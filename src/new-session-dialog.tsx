@@ -63,6 +63,7 @@ const CHOICE_KEY = "lite.newSession.choice.v1";
 const CODEX_KEY = "lite.newSession.codexProvider.v1";
 const SOURCE_KEY = "lite.newSession.source.v1";
 const WORKTREE_KEY = "lite.newSession.worktree.v1";
+const FLAGS_KEY = "lite.newSession.flags.v1";
 const SSH_HOST_KEY = "lite.newSession.sshHost.v1";
 // A Codex provider serving several models offers the choice here, remembered per provider so each keeps
 // its own model and thinking level. Rust owns which models and levels exist, because the catalog it hands
@@ -282,6 +283,8 @@ export function NewSessionDialog({
   const [suggestedBranch, setSuggestedBranch] = useState("");
   const [branch, setBranch] = useState("");
   const [title, setTitle] = useState("");
+  const [flags, setFlags] = useState("");
+  const [flagsOn, setFlagsOn] = useState(() => localStorage.getItem(FLAGS_KEY) === "true");
   const [repositoriesRoot, setRepositoriesRoot] = useState("");
   const [github, setGitHub] = useState<GitHubRepositories>();
   const [query, setQuery] = useState("");
@@ -602,6 +605,7 @@ export function NewSessionDialog({
     if (!open) {
       setTitle("");
       setBranch("");
+      setFlags("");
     }
     onOpenChange(open);
   }
@@ -694,6 +698,7 @@ export function NewSessionDialog({
         provider: choice.provider,
         model: panel && codexChoices[modelKey(panel.id)],
         reasoningEffort: panel && codexChoices[levelKey(panel.id)],
+        flags: (flagsOn && flags.trim()) || undefined,
         cwd: place.path,
         host: place.host ?? undefined,
         rootId: place.id,
@@ -708,6 +713,7 @@ export function NewSessionDialog({
       setDirectory(undefined);
       setTitle("");
       setBranch("");
+      setFlags("");
       onOpenChange(false);
       setLaunching(undefined);
     } catch (reason) {
@@ -1391,7 +1397,36 @@ export function NewSessionDialog({
                       autoComplete="off"
                       onChange={(event) => setTitle(event.target.value)}
                     />
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Label htmlFor="session-flags-on" className="text-xs text-muted-foreground">
+                        Flags
+                      </Label>
+                      <Switch
+                        id="session-flags-on"
+                        checked={flagsOn}
+                        onCheckedChange={(checked) => {
+                          localStorage.setItem(FLAGS_KEY, String(checked));
+                          setFlagsOn(checked);
+                        }}
+                      />
+                    </div>
                   </div>
+                  {flagsOn ? (
+                    <div className="flex items-center gap-3">
+                      <Label htmlFor="session-flags" className="w-12 shrink-0 text-xs text-muted-foreground">
+                        Flags
+                      </Label>
+                      <Input
+                        id="session-flags"
+                        value={flags}
+                        className="h-8 font-mono text-xs"
+                        placeholder="Extra CLI flags"
+                        autoComplete="off"
+                        spellCheck={false}
+                        onChange={(event) => setFlags(event.target.value)}
+                      />
+                    </div>
+                  ) : null}
                   {worktreeHere ? (
                     <div className="flex items-center gap-3">
                       <Label htmlFor="worktree-branch" className="w-12 shrink-0 text-xs text-muted-foreground">
