@@ -1984,6 +1984,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "shell-words",
  "sysinfo",
  "tauri",
  "tauri-build",
