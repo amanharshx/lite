@@ -903,6 +903,8 @@ pub struct UsageWindow {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
+    model: Option<String>,
+    reasoning: Option<String>,
     context_used_percent: Option<f64>,
     context_window: Option<u64>,
     context_tokens: Option<u64>,
@@ -1956,7 +1958,23 @@ pub fn capture_claude_status(path: &str, activity_path: &str) -> Result<(), Stri
             });
         }
     }
+    // Claude reports an effort level only for models that take one, and thinking for every model.
+    let thinking = input
+        .pointer("/thinking/enabled")
+        .and_then(serde_json::Value::as_bool);
     let snapshot = UsageSnapshot {
+        model: input
+            .pointer("/model/display_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        reasoning: match thinking {
+            Some(false) => Some("off".into()),
+            _ => input
+                .pointer("/effort/level")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| thinking.map(|_| "on".into())),
+        },
         context_used_percent: context
             .get("used_percentage")
             .and_then(serde_json::Value::as_f64),
@@ -1967,10 +1985,8 @@ pub fn capture_claude_status(path: &str, activity_path: &str) -> Result<(), Stri
         cost_usd: input
             .pointer("/cost/total_cost_usd")
             .and_then(serde_json::Value::as_f64),
-        lifetime_tokens: None,
-        banked_resets: None,
-        banked_reset_expiries: Vec::new(),
         windows,
+        ..UsageSnapshot::default()
     };
     let usage = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
     if !fs::read(path).is_ok_and(|current| current == usage) {
@@ -2882,6 +2898,12 @@ fn codex_context(path: &Path) -> Option<UsageSnapshot> {
 }
 
 fn native_context(path: &Path, agent: &str) -> Option<UsageSnapshot> {
+    let model = |record: &serde_json::Value| {
+        record
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     file_tail(path)?
         .lines()
         .rev()
@@ -2892,6 +2914,7 @@ fn native_context(path: &Path, agent: &str) -> Option<UsageSnapshot> {
             {
                 let tokens = record.pointer("/tokens/input")?.as_u64()?;
                 (tokens > 0).then(|| UsageSnapshot {
+                    model: model(&record),
                     context_tokens: Some(tokens),
                     ..UsageSnapshot::default()
                 })
@@ -2904,6 +2927,7 @@ fn native_context(path: &Path, agent: &str) -> Option<UsageSnapshot> {
                     .as_u64()?;
                 let window = record.get("contextWindowSize")?.as_u64()?;
                 (tokens > 0 && window > 0).then(|| UsageSnapshot {
+                    model: model(&record),
                     context_used_percent: Some(
                         (tokens as f64 / window as f64 * 100.0).clamp(0.0, 100.0),
                     ),
@@ -3017,9 +3041,17 @@ fn codex_usage(
                 .and_then(serde_json::Value::as_u64),
         });
     }
-    let context = responses
+    let thread = responses
         .get(&3)
-        .and_then(|response| response.pointer("/thread/path"))
+        .and_then(|response| response.get("thread"));
+    let text = |key| {
+        thread?
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let context = thread
+        .and_then(|thread| thread.get("path"))
         .and_then(serde_json::Value::as_str)
         .and_then(|path| codex_context(Path::new(path)));
     let mut banked_reset_expiries: Vec<_> = rates
@@ -3034,6 +3066,9 @@ fn codex_usage(
         .collect();
     banked_reset_expiries.sort_by_key(|expiry| expiry.unwrap_or(u64::MAX));
     Ok(UsageSnapshot {
+        // Codex reports the model and effort the thread is configured with now, not those of a past turn.
+        model: text("model"),
+        reasoning: text("reasoningEffort"),
         lifetime_tokens: summary
             .and_then(|value| value.pointer("/summary/lifetimeTokens"))
             .and_then(serde_json::Value::as_u64),
@@ -3909,10 +3944,24 @@ fn kimi_context(app: &AppHandle, session_id: &str) -> Option<UsageSnapshot> {
                 .join("agents/main/wire.jsonl")
         })
         .find(|path| path.is_file())?;
-    file_tail(&path)?
-        .lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    let tail = file_tail(&path)?;
+    let records = || {
+        tail.lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    };
+    // Every request names the model and thinking effort it ran with, so the newest names the current pair.
+    let request = records().find(|record| {
+        record.get("type").and_then(serde_json::Value::as_str) == Some("llm.request")
+    });
+    let text = |key| {
+        request
+            .as_ref()?
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    records()
         .find_map(|record| {
             if record.get("type").and_then(serde_json::Value::as_str) != Some("usage.record")
                 || record.get("usageScope").and_then(serde_json::Value::as_str) != Some("turn")
@@ -3933,6 +3982,11 @@ fn kimi_context(app: &AppHandle, session_id: &str) -> Option<UsageSnapshot> {
                 context_tokens: Some(tokens),
                 ..UsageSnapshot::default()
             })
+        })
+        .map(|usage| UsageSnapshot {
+            model: text("model"),
+            reasoning: text("thinkingEffort"),
+            ..usage
         })
 }
 
@@ -7002,7 +7056,8 @@ async fn read_usage(
                 usage
                     .windows
                     .retain(|window| window.resets_at.is_none_or(|reset| reset > now));
-                Ok((usage.context_used_percent.is_some()
+                Ok((usage.model.is_some()
+                    || usage.context_used_percent.is_some()
                     || usage.context_tokens.is_some_and(|tokens| tokens > 0)
                     || usage.cost_usd.is_some_and(|cost| cost > 0.0)
                     || !usage.windows.is_empty())
