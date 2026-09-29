@@ -3695,34 +3695,89 @@ fn session_arguments(
     }
 }
 
-// Flags the user typed for a session, split as a shell would. A flag that picks the conversation, or
-// replaces the settings and title Lite reads usage and resume from, is refused rather than passed twice.
+// Flags the user typed for a session, split as a shell would. A flag that takes control of which
+// conversation starts or resumes, or replaces the settings and title Lite reads usage and resume from,
+// is refused. Only Claude Code and Codex have those flags protected, so other agents take none; a shell
+// ignores the field.
 fn session_flags(agent: &str, flags: Option<&str>) -> Result<Vec<String>, String> {
     let Some(flags) = flags.filter(|_| agent != "shell") else {
         return Ok(Vec::new());
     };
     let flags =
         shell_words::split(flags).map_err(|error| format!("Could not read the flags: {error}"))?;
-    let refused = flags.iter().find(|flag| match agent {
-        "claude" => matches!(
-            flag.split('=').next().unwrap_or_default(),
-            "--resume"
-                | "-r"
-                | "--continue"
-                | "-c"
-                | "--session-id"
-                | "--settings"
-                | "--fork-session"
-        ),
-        "codex" => *flag == "resume" || flag.contains("terminal_title"),
-        _ => false,
-    });
-    match refused {
-        Some(flag) => Err(format!(
-            "{flag} conflicts with the arguments Lite passes. Remove it from the flags."
-        )),
-        None => Ok(flags),
-    }
+    let conflict = |flag: &String| {
+        format!(
+            "{flag} conflicts with how Lite starts and tracks this session. Remove it from the flags."
+        )
+    };
+    let refused = match agent {
+        "claude" => flags.iter().find_map(|flag| {
+            if matches!(
+                flag.split('=').next().unwrap_or_default(),
+                "--resume"
+                    | "-r"
+                    | "--continue"
+                    | "-c"
+                    | "--session-id"
+                    | "--settings"
+                    | "--fork-session"
+                    | "--from-pr"
+                    | "--teleport"
+                    | "--cloud"
+                    | "--bg"
+                    | "--background"
+            ) {
+                Some(conflict(flag))
+            } else if flag
+                .strip_prefix('-')
+                .is_some_and(|short| !short.starts_with('-') && short.contains(['c', 'r']))
+            {
+                // Short options combine and take attached values, so `-cp` and `-rID` pick a
+                // conversation too.
+                Some(format!(
+                    "{flag} can pick another conversation, since Claude Code reads -c and -r inside short options. If it is a value, write it as -n mycar or --name=-cool."
+                ))
+            } else {
+                None
+            }
+        }),
+        "codex" => {
+            // A config override is the word after `-c` or `--config`, or the text attached to
+            // either. Only its key is checked: a `tui` table replaces the whole table, so it drops
+            // Lite's title as surely as naming `terminal_title`.
+            let mut after_config = false;
+            flags
+                .iter()
+                .find(|flag| {
+                    let setting = if after_config {
+                        Some(flag.as_str())
+                    } else {
+                        flag.strip_prefix("--config=")
+                            .or_else(|| {
+                                flag.strip_prefix("-c")
+                                    .map(|rest| rest.strip_prefix('=').unwrap_or(rest))
+                            })
+                            .filter(|setting| !setting.is_empty())
+                    };
+                    after_config = matches!(flag.as_str(), "-c" | "--config");
+                    let key = setting.and_then(|setting| setting.split('=').next()).map(str::trim);
+                    matches!(flag.as_str(), "resume" | "fork")
+                        || flag.split('=').next() == Some("--remote")
+                        || key.is_some_and(|key| key == "tui" || key.contains("terminal_title"))
+                })
+                .map(conflict)
+        }
+        _ if flags.is_empty() => None,
+        _ => return Err("Flags are available for Claude Code and Codex only.".into()),
+    };
+    refused.map_or(Ok(flags), Err)
+}
+
+// The dialog asks before it clones or creates anything, so a refused flag is corrected there rather
+// than left in a session that cannot start.
+#[tauri::command]
+fn check_session_flags(agent: String, flags: String) -> Result<(), String> {
+    session_flags(&agent, Some(&flags)).map(drop)
 }
 
 fn codex_resume_arguments(provider_session_id: Option<&str>) -> Vec<String> {
@@ -7194,6 +7249,7 @@ pub fn run() {
             write_clipboard,
             set_attention_badge,
             quote_dropped_paths,
+            check_session_flags,
             choose_directory,
             follow_directory,
             github_items,
@@ -7270,6 +7326,57 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn claude_background_flags_cannot_discard_lites_session_id() {
+        let accepted = ["--bg", "--background"]
+            .into_iter()
+            .filter(|flags| check_session_flags("claude".into(), (*flags).into()).is_ok())
+            .collect::<Vec<_>>();
+        assert!(
+            accepted.is_empty(),
+            "accepted {accepted:?}; Claude ignores Lite's session ID"
+        );
+    }
+
+    #[test]
+    fn codex_refuses_a_tui_table_that_drops_the_title() {
+        let accepted = [
+            "-c 'tui={notification_condition=\"always\"}'",
+            "--config='tui={notification_condition=\"always\"}'",
+            "-c'tui={notification_condition=\"always\"}'",
+            "-c='tui={notification_condition=\"always\"}'",
+        ]
+        .into_iter()
+        .filter(|flags| check_session_flags("codex".into(), (*flags).into()).is_ok())
+        .collect::<Vec<_>>();
+        assert!(accepted.is_empty(), "accepted {accepted:?}");
+        // Only a config key can move the title; other values may name `tui` or `terminal_title`.
+        let refused = [
+            "--add-dir tui=workspace",
+            "--add-dir /tmp/terminal_title",
+            "-c 'model=\"terminal_title\"'",
+        ]
+        .into_iter()
+        .filter(|flags| check_session_flags("codex".into(), (*flags).into()).is_err())
+        .collect::<Vec<_>>();
+        assert!(refused.is_empty(), "refused {refused:?}");
+    }
+
+    #[test]
+    fn codex_refuses_a_remote_server() {
+        let accepted = [
+            "--remote ws://127.0.0.1:4500",
+            "--remote=ws://127.0.0.1:4500",
+        ]
+        .into_iter()
+        .filter(|flags| check_session_flags("codex".into(), (*flags).into()).is_ok())
+        .collect::<Vec<_>>();
+        assert!(accepted.is_empty(), "accepted {accepted:?}");
+        assert!(
+            check_session_flags("codex".into(), "--remote-auth-token-env TOKEN".into()).is_ok()
+        );
+    }
 
     #[test]
     fn github_names_stay_one_folder_deep() {

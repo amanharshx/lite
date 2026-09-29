@@ -612,6 +612,15 @@ export function NewSessionDialog({
 
   async function create(choice: Choice) {
     setError("");
+    const sessionFlags = (flagsOn && flags.trim()) || undefined;
+    // Checked once the dialog is busy but before anything is cloned or created, so a refused flag fails its
+    // own step and is fixed after Back rather than left in a session that cannot start.
+    const checking = sessionFlags ? [["Checking flags", "Checked flags"] as [string, string]] : [];
+    const checkFlags = async () => {
+      if (!sessionFlags) return;
+      await invoke("check_session_flags", { agent: choice.agent, flags: sessionFlags });
+      advance();
+    };
     try {
       let place: DirectoryGrant;
       let worktree = false;
@@ -625,6 +634,7 @@ export function NewSessionDialog({
           place: fullName(repository),
           // A clone that exists is used as it is; only a repository with none is cloned first.
           steps: [
+            ...checking,
             ...(repository.local
               ? []
               : [[`Cloning ${fullName(repository)}`, `Cloned ${fullName(repository)}`] as [string, string]]),
@@ -633,6 +643,7 @@ export function NewSessionDialog({
           ],
           done: 0,
         });
+        await checkFlags();
         const main = await invoke<DirectoryGrant>("prepare_repository", {
           owner: repository.owner,
           name: repository.name,
@@ -667,11 +678,13 @@ export function NewSessionDialog({
           choice,
           place: placeLabel,
           steps: [
+            ...checking,
             ...(making ? [["Creating worktree", "Created worktree"] as [string, string]] : []),
             [`Starting ${agentLabel(choice.agent)}`, `Started ${agentLabel(choice.agent)}`],
           ],
           done: 0,
         });
+        await checkFlags();
         place = await grant();
         // The probe's answer can lag the folder field, so the granted folder is asked directly:
         // the worktree and the recorded repository always describe where the session will run.
@@ -698,7 +711,7 @@ export function NewSessionDialog({
         provider: choice.provider,
         model: panel && codexChoices[modelKey(panel.id)],
         reasoningEffort: panel && codexChoices[levelKey(panel.id)],
-        flags: (flagsOn && flags.trim()) || undefined,
+        flags: sessionFlags,
         cwd: place.path,
         host: place.host ?? undefined,
         rootId: place.id,
