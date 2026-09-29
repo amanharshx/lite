@@ -6,15 +6,26 @@ interface Candidate {
   url: string;
 }
 
+// What a session keeps so a reference redrawn away still resolves as it did when it was seen: its ambiguous
+// references, as "kind number word" where the word before a reference may name its repository, and every
+// repository it named.
+export interface RememberedReferences {
+  mentions: string[];
+  repositories: string[];
+}
+
 export interface GitHubReferences {
   explicit: string[];
   // One entry per ambiguous reference: the item it would name in each repository the session has named.
   inferred: string[][];
+  // The remembered references with this text's added: mentions it no longer shows, then its own.
+  remembered: RememberedReferences;
 }
 
-// Repository-qualified references are certain. A bare number from user prose or an unqualified GitHub CLI
-// command may belong to any repository the session has named, and a short name narrows it to that one
-// (the only form output prose may use): GitHub activity must confirm one before the panel shows it.
+// Repository-qualified references are certain. A bare number from prose or an unqualified GitHub CLI command
+// may belong to any repository the session has named, and a short name narrows it to that one: GitHub
+// activity must confirm one before the panel shows it. A logged commit's trailing (#N) is history, not work,
+// and so is the feedback link at the foot of every Codecov comment a command prints.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: a color code has to be named to be removed.
 const COLOR = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: OSC hyperlinks are terminal framing.
@@ -27,6 +38,8 @@ const ITEM_MENTION =
   /(?:^|[^\w./-])(\w[\w.-]*\/\w[\w.-]*)[ \t]+(pull requests?|PRs?|issues?)[ \t]+#?([1-9]\d{0,8})(?!\w|\.\d)/gi;
 const ITEM_REFERENCE =
   /(?:^|[^\w./-])(?:(\w[\w.-]*)[ \t]+)?(?:(pull requests?|PRs?|issues?)[ \t]+#?|#)([1-9]\d{0,8})(?!\w|\.\d)/gi;
+const LOGGED_COMMIT = /^([^\w\n]*[\da-f]{7,40} .*)\(#\d+\)[ \t]*$/gim;
+const CODECOV_FOOTER = /Thoughts\s+on\s+this\s+report\?\s+\[Let\s+us\s+know!\]\([^\s)]*\)/gi;
 const GH_COMMAND = /\bgh\s+([\w-]+)\s+([\w-]+)((?:(?!\bgh\s)[^;&|'"\\\r\n]|\\.|'[^']*'|"(?:\\.|[^"\\])*")*)/gi;
 const GH_REPOSITORY =
   /^((?:[^'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")*?\s)(?:--repo|-R)(?:=|\s+)(?:([\w.-]+\/[\w.-]+)|'([\w.-]+\/[\w.-]+)'|"([\w.-]+\/[\w.-]+)")/i;
@@ -40,8 +53,9 @@ export function githubItemReferences(
   remote: string,
   terminalStream: string,
   prose: string,
+  remembered: RememberedReferences = { mentions: [], repositories: [] },
 ): GitHubReferences {
-  const text = output.replace(COLOR, "");
+  const text = output.replace(COLOR, "").replace(CODECOV_FOOTER, "");
   const userText = prose.replace(COLOR, "");
   const candidates: Candidate[] = [];
   const repositories = new Map<string, string>();
@@ -56,6 +70,7 @@ export function githubItemReferences(
   };
   const base = remote.match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i);
   if (base) nameRepository(base[1], base[2]);
+  for (const repository of remembered.repositories) nameRepository(...(repository.split("/") as [string, string]));
   for (const match of text.matchAll(GITHUB_REPOSITORY)) nameRepository(match[1], match[2]);
 
   for (const match of text.matchAll(GITHUB_ITEM))
@@ -69,7 +84,7 @@ export function githubItemReferences(
     for (const match of source.matchAll(ITEM_MENTION)) add(match, match[1], itemKind(match[2]), match[3], 2);
   }
   // Ambiguous forms are read once every repository the session names is known.
-  const ambiguous: { kind: string; number: string; name?: string }[] = [];
+  const mentions: string[] = [];
   for (const match of text.matchAll(GH_COMMAND)) {
     const repository = match[3].match(GH_REPOSITORY)?.slice(2).find(Boolean);
     // Any command names its repository, even one that names no item or whose number is a shell variable.
@@ -82,17 +97,13 @@ export function githubItemReferences(
     if (numbers?.length !== 1) continue;
     const kind = match[1].toLowerCase() === "pr" ? "pull" : "issues";
     if (repository) add(match, repository, kind, numbers[0].trim(), 2);
-    else ambiguous.push({ kind, number: numbers[0].trim() });
+    else mentions.push(`${kind} ${numbers[0].trim()} `);
   }
   for (const match of text.matchAll(GH_API))
     add(match, `${match[1]}/${match[2]}`, match[3].toLowerCase() === "pulls" ? "pull" : "issues", match[4], 3);
-  const names = new Set([...repositories.keys()].map((repository) => repository.split("/")[1]));
   for (const source of new Set([text, userText])) {
-    for (const match of source.matchAll(ITEM_REFERENCE)) {
-      const name = match[1]?.toLowerCase();
-      if (name && names.has(name)) ambiguous.push({ kind: itemKind(match[2]), number: match[3], name });
-      else if (source === userText) ambiguous.push({ kind: itemKind(match[2]), number: match[3] });
-    }
+    for (const match of source.replace(LOGGED_COMMIT, "$1").matchAll(ITEM_REFERENCE))
+      mentions.push(`${itemKind(match[2])} ${match[3]} ${match[1]?.toLowerCase() ?? ""}`);
   }
 
   candidates.sort((left, right) => left.index - right.index);
@@ -104,13 +115,23 @@ export function githubItemReferences(
   }
   const explicit = [...items.values()].map((candidate) => candidate.url);
   const inferred = new Map<string, string[]>();
-  for (const { kind, number, name } of ambiguous) {
+  const names = new Set([...repositories.keys()].map((repository) => repository.split("/")[1]));
+  for (const mention of new Set([...mentions, ...remembered.mentions])) {
+    const [kind, number, word] = mention.split(" ");
     const group = [...repositories.values()]
-      .filter((repository) => !name || repository.split("/")[1].toLowerCase() === name)
+      .filter((repository) => !names.has(word) || repository.split("/")[1].toLowerCase() === word)
       .map((repository) => `https://github.com/${repository}/${kind}/${number}`);
     if (group.length && !group.some((url) => items.has(itemKey(url)))) inferred.set(group.join(" "), group);
   }
-  return { explicit, inferred: [...inferred.values()] };
+  const shown = new Set(mentions);
+  return {
+    explicit,
+    inferred: [...inferred.values()],
+    remembered: {
+      mentions: [...remembered.mentions.filter((mention) => !shown.has(mention)), ...shown],
+      repositories: [...repositories.values()],
+    },
+  };
 }
 
 const RECENT_ACTIVITY_MS = 30 * 24 * 60 * 60 * 1000;

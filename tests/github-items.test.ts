@@ -7,8 +7,10 @@ import { Terminal } from "@xterm/xterm";
 import { githubItemReferences, likelyGitHubItems, mergeGitHubItems } from "../src/github-items";
 import { appendOutput, clearOutput, readTerminalInput, recordTerminalInput, renderedOutput } from "../src/output-store";
 
-const references = (output: string, remote = "", terminalStream = "", prose = output) =>
-  githubItemReferences(output, remote, terminalStream, prose);
+const references = (output: string, remote = "", terminalStream = "", prose = output) => {
+  const { explicit, inferred } = githubItemReferences(output, remote, terminalStream, prose);
+  return { explicit, inferred };
+};
 const explicit = (output: string) => references(output).explicit;
 
 describe("output activity", () => {
@@ -145,6 +147,17 @@ gh issue view 102 --repo ULTRALYTICS/LITE
     ]);
   });
 
+  test("reads Markdown links but not the Codecov comment footer", () => {
+    const comment = `Review [this PR](https://github.com/ultralytics/lite/pull/12)
+:loudspeaker: Thoughts on this report? [Let us know!](https://github.com/codecov/feedback/issues/255)
+#14 is next`;
+
+    expect(references(comment, "https://github.com/ultralytics/lite", "", "")).toEqual({
+      explicit: ["https://github.com/ultralytics/lite/pull/12"],
+      inferred: [["https://github.com/ultralytics/lite/pull/14"]],
+    });
+  });
+
   test("does not recover incomplete plain URLs from the control stream", () => {
     const stream = "https://github.com/ultralytics/lite/pull/36\u001b[2D12";
     expect(references("", "", stream)).toEqual({ explicit: [], inferred: [] });
@@ -172,25 +185,61 @@ ultralytics/lite PR #102
     });
   });
 
-  test("accepts user prose while rejecting unrelated output prose", () => {
+  test("reads bare references in user and agent prose but not logged commits", () => {
     const found = references(
       `https://github.com/ultralytics/lite/pull/111
-PRs #57/#56 merged
-sessionUndoToast, PR 57, Shift+Enter, PR 56
+#57, #56 and #58 are merged
+- #59 (palette masks): rewritten smaller
 91cec83 Add macOS session notifications and settings workspace (#84)
+  ⎿  7da5382 Update zensical (#349)
+Merged the docs note (#60)
+Please review (PR #61)
 The agent also discussed ultralytics/portal PR #3612.`,
       "https://github.com/ultralytics/lite",
       "",
       "Review PR #112 and issue 90 in this session",
     );
+    const group = (kind: string, number: number) =>
+      ["lite", "portal"].map((name) => `https://github.com/ultralytics/${name}/${kind}/${number}`);
 
     expect(found).toEqual({
       explicit: ["https://github.com/ultralytics/lite/pull/111", "https://github.com/ultralytics/portal/pull/3612"],
       inferred: [
-        ["https://github.com/ultralytics/lite/pull/112", "https://github.com/ultralytics/portal/pull/112"],
-        ["https://github.com/ultralytics/lite/issues/90", "https://github.com/ultralytics/portal/issues/90"],
+        group("pull", 57),
+        group("pull", 56),
+        group("pull", 58),
+        group("pull", 59),
+        group("pull", 60),
+        group("pull", 61),
+        group("pull", 112),
+        group("issues", 90),
       ],
     });
+  });
+
+  test("resolves references a redraw removed as they resolved when seen", () => {
+    const output = `#26430 is merged and gh pr view 7
+[PR #102: fix crash](https://github.com/ultralytics/ultralytics/pull/102)
+https://github.com/ultralytics/portal/pull/999
+Portal #192 needs review`;
+    const seen = githubItemReferences(output, "", "", "");
+    expect(seen.remembered).toEqual({
+      mentions: ["pull 7 ", "pull 26430 ", "pull 102 pr", "pull 192 portal"],
+      repositories: ["ultralytics/ultralytics", "ultralytics/portal"],
+    });
+    // The same output remembers nothing new.
+    expect(githubItemReferences(output, "", "", "", seen.remembered).remembered).toEqual(seen.remembered);
+
+    // A label's group still holds its linked item, which the panel already lists, and a short name still
+    // narrows to its repository.
+    const group = (number: number) =>
+      ["lite", "ultralytics", "portal"].map((name) => `https://github.com/ultralytics/${name}/pull/${number}`);
+    expect(githubItemReferences("", "https://github.com/ultralytics/lite", "", "", seen.remembered).inferred).toEqual([
+      group(7),
+      group(26430),
+      group(102),
+      ["https://github.com/ultralytics/portal/pull/192"],
+    ]);
   });
 
   test("uses one named repository to resolve user prose without a Git remote", () => {
@@ -247,7 +296,7 @@ gh pr merge 347 -R ultralytics/handbook --squash`,
     expect(likelyGitHubItems(checked, [group], now)).toEqual([checked[1]]);
   });
 
-  test("resolves a short repository name only against repositories the session names", () => {
+  test("narrows a reference to a short repository name the session names", () => {
     expect(
       references(
         "ultralytics/portal#4225 merged; Lite #192 is approved; Since #3143 it skips",
@@ -255,7 +304,10 @@ gh pr merge 347 -R ultralytics/handbook --squash`,
         "",
         "",
       ).inferred,
-    ).toEqual([["https://github.com/ultralytics/lite/pull/192"]]);
+    ).toEqual([
+      ["https://github.com/ultralytics/lite/pull/192"],
+      ["https://github.com/ultralytics/lite/pull/3143", "https://github.com/ultralytics/portal/pull/3143"],
+    ]);
   });
 
   test("reads an unqualified command number inside Claude Code's Bash(...)", () => {

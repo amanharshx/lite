@@ -59,7 +59,14 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { githubItemReferences, itemKey, likelyGitHubItems, mergeGitHubItems } from "@/github-items";
+import {
+  type GitHubReferences,
+  githubItemReferences,
+  itemKey,
+  likelyGitHubItems,
+  mergeGitHubItems,
+  type RememberedReferences,
+} from "@/github-items";
 import { SEMANTIC_PROGRESS_CLASSES, type SemanticTone } from "@/lib/semantic-styles";
 import { cn, including, without } from "@/lib/utils";
 import {
@@ -102,6 +109,7 @@ function namedInSession(sessionId: string, remote: string) {
     remote,
     readTerminalStream(sessionId),
     readTerminalInput(sessionId),
+    rememberedReferences(sessionId),
   );
 }
 
@@ -155,6 +163,24 @@ function pendingGitHubItem(url: string): GitHubItem {
 
 const GITHUB_ITEMS_KEY = "lite.github-items";
 const REMOVED_GITHUB_ITEMS_KEY = "lite.github-items.removed";
+const REMEMBERED_REFERENCES_KEY = "lite.github-items.remembered";
+// A session keeps its latest ambiguous references and its first repositories; each panel visit asks GitHub
+// about every candidate they make.
+const MAX_MENTIONS = 500;
+const MAX_REPOSITORIES = 50;
+
+// The mentions each session's last render showed. A new mention is kept only once two renders in a row show
+// it, so a number still streaming in, such as #10 on its way to #102, is not kept. A repository is kept when
+// first seen, because a mention kept later may depend on it.
+const lastRendered = new Map<string, string[]>();
+
+function rememberedReferences(sessionId: string): RememberedReferences {
+  const sessions = JSON.parse(localStorage.getItem(REMEMBERED_REFERENCES_KEY) ?? "{}") as Record<
+    string,
+    RememberedReferences
+  >;
+  return sessions[sessionId] ?? { mentions: [], repositories: [] };
+}
 
 function removedGitHubItems(sessionId: string) {
   const sessions = JSON.parse(localStorage.getItem(REMOVED_GITHUB_ITEMS_KEY) ?? "{}") as Record<string, string[]>;
@@ -188,10 +214,32 @@ function retainGitHubItems(sessionId: string, updates: GitHubItem[], disowned = 
   return sessionGitHubItems(sessionId);
 }
 
-// Full-screen terminals can redraw a link away before the Git panel is opened. Remember references
-// when xterm renders them; the panel fills in their current GitHub metadata when it is visited.
+// Full-screen terminals and long sessions can redraw or scroll a reference away before the Git panel is
+// opened. Remember references when xterm renders them; the panel resolves ambiguous ones against the
+// session's repositories and fills in current GitHub metadata when it is visited.
 export function rememberGitHubReferences(sessionId: string, output: string, terminalStream: string) {
-  const { explicit } = githubItemReferences(output, "", terminalStream, "");
+  const current = rememberedReferences(sessionId);
+  const { explicit, remembered } = githubItemReferences(output, "", terminalStream, "", current);
+  const settled = new Set([...current.mentions, ...(lastRendered.get(sessionId) ?? [])]);
+  lastRendered.set(sessionId, remembered.mentions);
+  // What the terminal still shows comes last, so the same output always keeps the same, newest mentions, and
+  // the first repositories a session names stay named.
+  const next = {
+    mentions: remembered.mentions.filter((mention) => settled.has(mention)).slice(-MAX_MENTIONS),
+    repositories: remembered.repositories.slice(0, MAX_REPOSITORIES),
+  };
+  if (JSON.stringify(next) !== JSON.stringify(current)) {
+    const sessions = JSON.parse(localStorage.getItem(REMEMBERED_REFERENCES_KEY) ?? "{}") as Record<
+      string,
+      RememberedReferences
+    >;
+    sessions[sessionId] = next;
+    localStorage.setItem(REMEMBERED_REFERENCES_KEY, JSON.stringify(sessions));
+  }
+  rememberGitHubItems(sessionId, explicit);
+}
+
+function rememberGitHubItems(sessionId: string, explicit: string[]) {
   if (!explicit.length) return;
   const current = sessionGitHubItems(sessionId);
   const known = new Set(current.map((item) => itemKey(item.url)));
@@ -1630,6 +1678,13 @@ export function clearInspectorCache(sessionId: string) {
   const removed = JSON.parse(localStorage.getItem(REMOVED_GITHUB_ITEMS_KEY) ?? "{}") as Record<string, string[]>;
   delete removed[sessionId];
   localStorage.setItem(REMOVED_GITHUB_ITEMS_KEY, JSON.stringify(removed));
+  const remembered = JSON.parse(localStorage.getItem(REMEMBERED_REFERENCES_KEY) ?? "{}") as Record<
+    string,
+    RememberedReferences
+  >;
+  delete remembered[sessionId];
+  localStorage.setItem(REMEMBERED_REFERENCES_KEY, JSON.stringify(remembered));
+  lastRendered.delete(sessionId);
 }
 
 function GitPanel({
@@ -1683,7 +1738,7 @@ function GitPanel({
         const groups = (references: string[][]) => references.map((group) => group.join(" ")).join("\n");
         return explicit.length === current.explicit.length && groups(inferred) === groups(current.inferred)
           ? current
-          : { explicit, inferred };
+          : { explicit, inferred, remembered: next.remembered };
       });
     };
     const unsubscribe = subscribeTerminalOutput(sessionId, () => {
@@ -1697,48 +1752,69 @@ function GitPanel({
     };
   }, [active, remote, sessionId]);
 
-  // A named item belongs to the session once. Later checks update its GitHub state, but never remove it.
-  // User prose or an unqualified command first has to be confirmed as recent activity, and each check asks
-  // about every candidate, so a repository named later can still hold the most active one.
+  // GitHub's answers since the panel was last opened or refreshed, by item, with the reference set each
+  // answered: what GitHub said, or null for an item it says does not exist. A listed item is asked again
+  // whenever the references change; a candidate for an ambiguous reference only once. Nothing being asked
+  // is asked again, so a busy session never overlaps its checks, and opening the panel asks afresh.
+  const [answers, setAnswers] = useState(
+    () => new Map<string, { item: GitHubItem | null; references: GitHubReferences }>(),
+  );
+  const asking = useRef(new Set<string>());
   useEffect(() => {
-    const { explicit, inferred } = references;
+    if (active) setAnswers(new Map());
+  }, [active]);
+
+  // A named item belongs to the session once. Later checks update its GitHub state, but never remove it.
+  // A bare reference or an unqualified command first has to be confirmed as recent activity, and every
+  // candidate is asked about, so a repository named later can still hold the most active one.
+  useEffect(() => {
     const visible = sessionGitHubItems(sessionId);
     const known = new Set(visible.map((item) => itemKey(item.url)));
     const shown = mergeGitHubItems(
       visible,
-      explicit.map((url) => ({ url })),
+      references.explicit.map((url) => ({ url })),
     ).map((item) => item.url);
+    // A bare reference to an item the session already lists, or listed until the user removed it, is that
+    // item, not a new question.
+    const listed = new Set([...shown.map(itemKey), ...removedGitHubItems(sessionId)]);
+    const inferred = references.inferred.filter((group) => !group.some((url) => listed.has(itemKey(url))));
     const urls = [...shown, ...inferred.flat()];
-    if (!urls.length) {
-      setItems([]);
-      setLoadingUrls([]);
+    const keys = [...new Set(urls.map(itemKey))];
+    const stale = (key: string) => {
+      const answer = answers.get(key);
+      return !answer || (listed.has(key) && answer.references !== references);
+    };
+    const missing = urls.filter((url) => stale(itemKey(url)) && !asking.current.has(itemKey(url)));
+    if (missing.length) {
+      for (const url of missing) asking.current.add(itemKey(url));
+      // A check that never answered is not evidence against a link, which then shows as printed.
+      void invoke<GitHubItem[]>("github_items", { urls: missing })
+        .catch(() => missing.map(pendingGitHubItem))
+        .then((checked) => {
+          const found = new Map(checked.map((item) => [itemKey(item.url), item]));
+          for (const url of missing) asking.current.delete(itemKey(url));
+          setAnswers((current) => {
+            const next = new Map(current);
+            for (const url of missing) next.set(itemKey(url), { item: found.get(itemKey(url)) ?? null, references });
+            return next;
+          });
+        });
+    }
+    const pending = new Set(keys.filter((key) => !answers.has(key)));
+    if (pending.size) {
+      setItems(visible);
+      setLoadingUrls(shown.filter((url) => pending.has(itemKey(url))));
       return;
     }
-    let disposed = false;
-    setItems(visible);
-    setLoadingUrls(shown);
-    void invoke<GitHubItem[]>("github_items", { urls })
-      .then((checked) => {
-        if (!disposed) {
-          const likely = new Set(likelyGitHubItems(checked, inferred));
-          const updates = checked.filter((item) =>
-            known.has(itemKey(item.url)) ? item.title !== null : likely.has(item),
-          );
-          // An item GitHub left out of its answer is one GitHub says does not exist, such as a link
-          // a redraw clipped, so the session forgets it rather than keeping it as printed.
-          const answered = new Set(checked.map((item) => itemKey(item.url)));
-          const disowned = new Set(urls.map(itemKey).filter((key) => !answered.has(key)));
-          setItems(retainGitHubItems(sessionId, updates, disowned));
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!disposed) setLoadingUrls([]);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [references, sessionId]);
+    const checked = keys.map((key) => answers.get(key)?.item).filter((item): item is GitHubItem => !!item);
+    const likely = new Set(likelyGitHubItems(checked, inferred));
+    const updates = checked.filter((item) => (known.has(itemKey(item.url)) ? item.title !== null : likely.has(item)));
+    // An item GitHub says does not exist, such as a link a redraw clipped, is forgotten rather than kept
+    // as printed.
+    const disowned = new Set(keys.filter((key) => answers.get(key)?.item === null));
+    setItems(retainGitHubItems(sessionId, updates, disowned));
+    setLoadingUrls([]);
+  }, [answers, references, sessionId]);
 
   async function openDiff(path: string) {
     const request = ++diffRequest.current;
