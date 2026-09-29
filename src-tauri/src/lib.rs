@@ -7351,7 +7351,7 @@ fn write_clipboard(text: String) -> Result<(), String> {
 // website, so setting those here would look thorough and show nothing.
 #[cfg(target_os = "macos")]
 fn describe_app(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{AboutMetadata, Menu, MenuItemKind, PredefinedMenuItem};
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 
     let about = AboutMetadata {
         name: Some("Lite".into()),
@@ -7370,7 +7370,25 @@ fn describe_app(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
         app_menu.remove_at(0)?;
         app_menu.insert(&PredefinedMenuItem::about(app, None, Some(about))?, 0)?;
+        // The stock Quit is last. It terminates the app without a close request, skipping the
+        // running-session and unsaved-file checks, so Quit closes the windows as the close button
+        // does. All of them: closing only the workspace during startup would leave the splash open.
+        app_menu.remove_at(app_menu.items()?.len() - 1)?;
+        app_menu.append(&MenuItem::with_id(
+            app,
+            "quit",
+            "Quit Lite",
+            true,
+            Some("Cmd+Q"),
+        )?)?;
     }
+    app.on_menu_event(|app, event| {
+        if event.id() == "quit" {
+            for window in app.webview_windows().into_values() {
+                let _ = window.close();
+            }
+        }
+    });
     app.set_menu(menu)?;
     Ok(())
 }
