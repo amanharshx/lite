@@ -1087,6 +1087,7 @@ export function NewSessionDialog({
           onKeyDown={numberKey}
           className={cn("flex min-h-0 min-w-0 flex-1 flex-col", launching && "hidden")}
         >
+          <button type="submit" className="sr-only" tabIndex={-1} aria-hidden="true" />
           <DialogHeader className="px-5 pt-4 pb-3">
             <DialogTitle>New session</DialogTitle>
             <DialogDescription className="sr-only">
