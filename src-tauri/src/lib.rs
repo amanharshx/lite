@@ -3726,16 +3726,20 @@ fn session_flags(agent: &str, flags: Option<&str>) -> Result<Vec<String>, String
                     | "--cloud"
                     | "--bg"
                     | "--background"
+                    | "--worktree"
+                    | "--bare"
+                    | "--no-session-persistence"
+                    | "--environment"
             ) {
                 Some(conflict(flag))
             } else if flag
                 .strip_prefix('-')
-                .is_some_and(|short| !short.starts_with('-') && short.contains(['c', 'r']))
+                .is_some_and(|short| !short.starts_with('-') && short.contains(['c', 'r', 'w']))
             {
-                // Short options combine and take attached values, so `-cp` and `-rID` pick a
-                // conversation too.
+                // Short options combine and take attached values; session and worktree selectors
+                // must not replace the conversation or workspace Lite owns.
                 Some(format!(
-                    "{flag} can pick another conversation, since Claude Code reads -c and -r inside short options. If it is a value, write it as -n mycar or --name=-cool."
+                    "{flag} can change the conversation or workspace through a short option. Write attached values separately, for example -n mycar."
                 ))
             } else {
                 None
@@ -3762,7 +3766,8 @@ fn session_flags(agent: &str, flags: Option<&str>) -> Result<Vec<String>, String
                     after_config = matches!(flag.as_str(), "-c" | "--config");
                     let key = setting.and_then(|setting| setting.split('=').next()).map(str::trim);
                     matches!(flag.as_str(), "resume" | "fork")
-                        || flag.split('=').next() == Some("--remote")
+                        || matches!(flag.split('=').next(), Some("--remote" | "--cd" | "--worktree"))
+                        || flag.starts_with("-C")
                         || key.is_some_and(|key| key == "tui" || key.contains("terminal_title"))
                 })
                 .map(conflict)
@@ -7328,14 +7333,22 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     #[test]
-    fn claude_background_flags_cannot_discard_lites_session_id() {
-        let accepted = ["--bg", "--background"]
-            .into_iter()
-            .filter(|flags| check_session_flags("claude".into(), (*flags).into()).is_ok())
-            .collect::<Vec<_>>();
+    fn claude_flags_preserve_lites_session_and_workspace() {
+        let accepted = [
+            "--bg",
+            "--background",
+            "--worktree",
+            "-wother",
+            "--bare",
+            "--no-session-persistence",
+            "--environment cloud",
+        ]
+        .into_iter()
+        .filter(|flags| check_session_flags("claude".into(), (*flags).into()).is_ok())
+        .collect::<Vec<_>>();
         assert!(
             accepted.is_empty(),
-            "accepted {accepted:?}; Claude ignores Lite's session ID"
+            "accepted {accepted:?}; Claude bypasses Lite's session or workspace"
         );
     }
 
@@ -7364,10 +7377,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_refuses_a_remote_server() {
+    fn codex_flags_preserve_lites_server_and_workspace() {
         let accepted = [
             "--remote ws://127.0.0.1:4500",
             "--remote=ws://127.0.0.1:4500",
+            "--cd /tmp",
+            "--cd=/tmp",
+            "-C/tmp",
+            "-C /tmp",
+            "--worktree",
         ]
         .into_iter()
         .filter(|flags| check_session_flags("codex".into(), (*flags).into()).is_ok())
