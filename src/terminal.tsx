@@ -245,7 +245,7 @@ function fileLinks(terminal: Terminal, y: number, open: (path: string, line?: nu
     // A bare name such as README.md reads as prose, unless a :line says it is a reference.
     if (!/[^\\/][\\/]/.test(path) && path === link && after === undefined) continue;
     const before = text.slice(Math.max(0, index - 300), index);
-    // An absolute path with no extension, then spaces and capitalised words, is read as a folder name
+    // An absolute path with no extension, then spaces and capitalized words, is read as a folder name
     // with spaces in it that this path continues; punctuation is read as the end of a sentence. Both are
     // guesses. A lowercase folder name is read as prose, so its tail still links and can open a
     // different file of the same relative path under the session's folder.
