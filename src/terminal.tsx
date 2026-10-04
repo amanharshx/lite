@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FitAddon } from "@xterm/addon-fit";
 import { type ISearchOptions, SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { type ITheme, Terminal } from "@xterm/xterm";
+import { type IBuffer, type IBufferLine, type ILink, type ITheme, Terminal } from "@xterm/xterm";
 import { ArrowDownToLine, ChevronDown, ChevronUp, Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
@@ -112,6 +112,173 @@ const SEQUENCES = /\x1b(?:[\]P][\s\S]*?(?:\x07|\x1b\\)|\[[\x30-\x3f]*[ -/]*[@-~]
 // biome-ignore lint/suspicious/noControlCharactersInRegex: a control sequence is defined by them
 const PARTIAL = /\x1b(?:[\]P](?:(?!\x07|\x1b\\)[\s\S])*|\[[\x30-\x3f]*[ -/]*|O)$/;
 
+// What a file name is made of: letters, digits and marks of any script, so 中文.ts and résumé.md are whole.
+const WORD = String.raw`\p{L}\p{N}\p{M}_`;
+
+// A file path, with an optional :line:col, that is not the tail of a longer token or URL: either from a
+// Windows drive or UNC share, or relative or absolute, which may start with ./, ../, / or a hidden folder. A folder
+// follows / or \, but never a \ and a dot, which is how a regex escapes one: README\.md is not a path.
+// Nor does a path start right after an emoji, which is part of a name this cannot read: src/😀a.ts.
+const FILE_PATH = new RegExp(
+  String.raw`(?<![${WORD}\p{Extended_Pictographic}\u200d\ufe0f./\\:@~)\]}-])(?:[A-Za-z]:[\\/][${WORD}@+.-]+(?:[\\/][${WORD}@+.-]+)*|\\\\[${WORD}.-]+\\[${WORD}.-]+(?:\\[${WORD}@+.-]+)*|(?:(?:\.{1,2}[\\/])+|[\\/])?\.?[${WORD}@+-][${WORD}@+.-]*(?:\/+[${WORD}@+.-]+|\\[${WORD}@+-][${WORD}@+.-]*)*)(?::\d+){0,2}`,
+  "gu",
+);
+
+// A quoted path, which may hold spaces: the quotes say where it ends, and a :line may follow them. Only
+// the quote that opened it ends it, so a name may hold the other kinds. An absolute or ./ path may hold
+// spaces anywhere. A relative one only in its file name, and a bare file name not at all, so a quoted
+// sentence such as "Update docs/readme.md" or 'echo README.md:5' is not a path.
+const QUOTED = new RegExp(
+  String.raw`(["'\x60])((?:(?:(?:[A-Za-z]:[\\/]|\\\\[${WORD}.-]+\\|\.{0,2}\/)(?:[^"'\x60\n]|(?<=[${WORD}])(?!\1)["'\x60])*|(?:[${WORD}.@+-]+[\\/])+[${WORD}.@+-](?:[^"'\x60\n\\/{}$<>|=]|(?<=[${WORD}])(?!\1)["'\x60])*|[${WORD}.@+-]+)\.[A-Za-z]\w*|(?:[${WORD}.@+-]+\/)*\.[${WORD}@+-][${WORD}.@+-]*)(?::\d+){0,2})\1(?::(\d+))?`,
+  "gu",
+);
+
+// The end of a row that cut a path, and the start of the row that picks it up after its indent. A
+// path is cut after a folder, so the next row starts inside it, never with a / or a drive of its own.
+const CUT_END = new RegExp(String.raw`[${WORD}@+.][-/\\]$`, "u");
+const CUT_REST = /^[\s│]*(?![A-Za-z]:[\\/]|[\\/])\S/;
+
+// How many cells the indent an app drew takes: spaces and │, a wide space counting as two.
+function indentCells(line: IBufferLine) {
+  let x = 0;
+  while (x < line.length && /^[\s│]?$/.test(line.getCell(x)?.getChars() ?? "")) x++;
+  return x;
+}
+
+// Text shaped like a path that is not a file: a web address without its scheme, a repository such as
+// owner/name.git, a git range such as main...HEAD, or a relative path mixing / and \, which is a
+// newline escape such as \n in front of a path.
+const NOT_FILE =
+  /^(?:[\w-]+\.)+(?:com|org|net|io|dev|ai|co|me)(?:\/|$)|\w\.git$|\.\.(?![\\/])|^(?![A-Za-z]:)(?=[^\\]*\\)(?=[^/]*\/)/i;
+
+// Cells in the word a row starts with after its indent, which a wrapping app will not split, counted on
+// through the rows the terminal wrapped it onto. A wide character takes two.
+function wordCells(buffer: IBuffer, row: number, indent: number) {
+  let total = 0;
+  for (let from = indent, line = buffer.getLine(row); line; from = 0, line = buffer.getLine(++row)) {
+    let x = from;
+    while (x < line.length && (line.getCell(x)?.getWidth() === 0 || /\S/.test(line.getCell(x)?.getChars() ?? ""))) x++;
+    total += x - from;
+    if (x < line.length || !buffer.getLine(row + 1)?.isWrapped) break;
+  }
+  return total;
+}
+
+// A row continues the one above when the terminal soft-wrapped it, or when that row ends in a path cut
+// at a "-" or "/" and this one picks it up after its indent, which is how Codex and Claude draw a long
+// path. An app cuts there only because the next word would not fit, so a short row at the same indent,
+// as in a list of folders, is never joined.
+function continues(buffer: IBuffer, row: number) {
+  const line = buffer.getLine(row);
+  if (!line || row === 0) return false;
+  if (line.isWrapped) return true;
+  const prev = buffer.getLine(row - 1);
+  if (!CUT_REST.test(line.translateToString(true)) || !CUT_END.test(prev?.translateToString(true) ?? "")) return false;
+  let used = line.length;
+  while (used > 0 && !prev?.getCell(used - 1)?.getChars()) used--;
+  const indent = indentCells(line);
+  // Or the row is indented under the one above, as a wrapped line's rest is. That outlasts a resize,
+  // which the width the app cut at does not.
+  return used + wordCells(buffer, row, indent) > line.length || (prev !== undefined && indent > indentCells(prev));
+}
+
+// Links the file paths on the row at 1-based `y`, reading through the rows of one path. Only a path
+// with an extension, and a directory part or a :line, is a link, so words like Node.js, ranges like
+// main...HEAD, and code like </Foo.Bar> or /.test/ stay text. The @ that marks a file mention is not
+// part of the path.
+function fileLinks(terminal: Terminal, y: number, open: (path: string, line?: number) => void): ILink[] {
+  const buffer = terminal.buffer.active;
+  let first = y - 1;
+  while (continues(buffer, first)) first--;
+  let text = "";
+  const cells: number[] = [];
+  for (let row = first, line = buffer.getLine(row); line; line = buffer.getLine(++row)) {
+    if (row > first && !continues(buffer, row)) break;
+    // A row joined by hand starts after the indent the app drew, which is not part of the path.
+    const indent = row > first && !line.isWrapped ? indentCells(line) : 0;
+    // Cells after the last one written are padding, not text: a wide character that did not fit leaves
+    // one, and a screen that grew leaves many.
+    let last = terminal.cols - 1;
+    while (last > indent && !line.getCell(last)?.getChars()) last--;
+    for (let x = indent; x <= last; x++) {
+      const cell = line.getCell(x);
+      if (!cell?.getWidth()) continue;
+      const chars = cell.getChars() || " ";
+      text += chars;
+      for (let i = 0; i < chars.length; i++) cells.push(row * terminal.cols + x);
+    }
+    // The blank cells after a row that was cut by hand would split the path.
+    if (!buffer.getLine(row + 1)?.isWrapped)
+      while (text.endsWith(" ")) {
+        text = text.slice(0, -1);
+        cells.pop();
+      }
+  }
+  // A quoted path may hold spaces, so its quotes end it. Unquoted, a space ends a path, and the tail of
+  // an unfinished one such as /Users/me/My Project/src/a.ts names nothing.
+  const quotes = Array.from(text.matchAll(QUOTED), (match) => ({
+    index: match.index + 1,
+    raw: match[2],
+    after: match[3],
+  }));
+  const found = [
+    ...quotes.map((quote) => ({ ...quote, quoted: true })),
+    ...Array.from(text.matchAll(FILE_PATH), (match) => ({
+      index: match.index,
+      raw: match[0],
+      after: undefined,
+      quoted: false,
+    })),
+  ];
+  // When the scrollback cap has cut the start of a wrapped path off, what is left names nothing.
+  const truncated = first === 0 && buffer.getLine(0)?.isWrapped;
+  const links: ILink[] = [];
+  for (const { index, raw, after, quoted } of found) {
+    if (truncated && index === 0 && !quoted) continue;
+    // A full stop ends a sentence, but inside quotes it is part of the name, which no link can name.
+    const link = quoted ? raw : raw.replace(/\.+$/, "");
+    const quote = text[index - 1];
+    if (!quoted && link !== raw && quote && /["'`]/.test(quote) && text[index + raw.length] === quote) continue;
+    const [, path, inside] = /^(.*?)(?::(\d+))?(?::\d+)?$/.exec(link) ?? [];
+    const line = inside ?? after;
+    if (!/\.[A-Za-z]\w*$/.test(path) || NOT_FILE.test(path)) continue;
+    // A bare name such as README.md reads as prose, unless a :line says it is a reference.
+    if (!/[^\\/][\\/]/.test(path) && path === link && after === undefined) continue;
+    const before = text.slice(Math.max(0, index - 300), index);
+    // An absolute path with no extension, then spaces and capitalised words, is read as a folder name
+    // with spaces in it that this path continues; punctuation is read as the end of a sentence. Both are
+    // guesses. A lowercase folder name is read as prose, so its tail still links and can open a
+    // different file of the same relative path under the session's folder.
+    const folder = /(?:^|\s)((?:\/|[A-Za-z]:[\\/])(?:\S*[^\s.,;:!?])?)(?:\s+[A-Z0-9(][^\s/\\.,;:!?]*)*\s+$/.exec(
+      before,
+    )?.[1];
+    if (
+      !quoted &&
+      (quotes.some((quote) => index >= quote.index && index < quote.index + quote.raw.length) ||
+        (folder !== undefined && !/\.[A-Za-z]\w*(?::\d+){0,2}$/.test(folder) && !/^(?:\/|[A-Za-z]:[\\/])/.test(raw)))
+    )
+      continue;
+    const start = cells[index];
+    const end = cells[index + link.length - 1];
+    const range = {
+      start: { x: (start % terminal.cols) + 1, y: Math.floor(start / terminal.cols) + 1 },
+      end: { x: (end % terminal.cols) + 1, y: Math.floor(end / terminal.cols) + 1 },
+    };
+    if (y >= range.start.y && y <= range.end.y)
+      links.push({
+        range,
+        text: link,
+        activate: () => {
+          // Git writes a/ and b/ before the two sides of a diff; they are folders anywhere else. A click
+          // can read the whole line, which a long header needs: its second path is far from its start.
+          const diff = /(?:---|\+\+\+|diff --git(?: (?:"[^"]*"|\S+))?) "?$/.test(text.slice(0, index));
+          open(path.replace(diff ? /^(?:@|[ab]\/)/ : /^@/, ""), line ? Number(line) : undefined);
+        },
+      });
+  }
+  return links;
+}
+
 export function TerminalView({
   sessionId,
   rootId,
@@ -124,6 +291,7 @@ export function TerminalView({
   onZoom,
   onPrompt,
   onOutput,
+  onOpenFile,
   onRecover,
 }: {
   sessionId: string;
@@ -137,6 +305,7 @@ export function TerminalView({
   onZoom: (step: -1 | 0 | 1) => void;
   onPrompt: (text: string) => void;
   onOutput: (output: string, terminalStream: string) => void;
+  onOpenFile: (path: string, line?: number) => void;
   onRecover: () => Promise<void>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -147,6 +316,8 @@ export function TerminalView({
   promptRef.current = onPrompt;
   const outputRef = useRef(onOutput);
   outputRef.current = onOutput;
+  const openFileRef = useRef(onOpenFile);
+  openFileRef.current = onOpenFile;
   const recoverRef = useRef(onRecover);
   recoverRef.current = onRecover;
   const zoomRef = useRef(onZoom);
@@ -210,6 +381,9 @@ export function TerminalView({
       setSearchResult(result);
     });
     terminal.loadAddon(new WebLinksAddon(openLink));
+    terminal.registerLinkProvider({
+      provideLinks: (y, callback) => callback(fileLinks(terminal, y, (path, line) => openFileRef.current(path, line))),
+    });
     terminal.open(container);
     const scroll = terminal.onScroll((viewportY) => setScrolledUp(viewportY < terminal.buffer.active.baseY));
     const disconnectTerminalOutput = connectTerminalOutput(sessionId, () => renderedOutput(terminal));

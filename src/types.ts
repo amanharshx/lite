@@ -94,6 +94,12 @@ export interface FileEntry {
   isSymlink: boolean;
 }
 
+// A file to open in the editor, optionally at a 1-based line.
+export interface FileRequest {
+  path: string;
+  line?: number;
+}
+
 export interface DirectoryCursor {
   name: string;
   path: string;
