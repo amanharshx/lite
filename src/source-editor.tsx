@@ -434,12 +434,14 @@ export default function SourceEditor({
   source,
   baseline,
   fontSize,
+  line,
   onChange,
 }: {
   path: string;
   source: string;
   baseline?: string;
   fontSize?: number;
+  line?: number;
   onChange?: (source: string) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
@@ -447,6 +449,7 @@ export default function SourceEditor({
   const revert = useRef<(() => void) | null>(null);
   const change = useRef(onChange);
   const initialSource = useRef(source);
+  const initialLine = useRef(line);
   const [panel, setPanel] = useState<{ dom: HTMLElement; view: EditorView } | null>(null);
   const [query, setQuery] = useState(() => new SearchQuery({ search: "" }));
   const [matches, setMatches] = useState({ index: -1, count: 0 });
@@ -636,6 +639,13 @@ export default function SourceEditor({
       .then((language) => {
         if (!disposed) editor.dispatch({ effects: StateEffect.appendConfig.of(language) });
       });
+    if (initialLine.current) {
+      const target = editor.state.doc.line(Math.min(initialLine.current, editor.state.doc.lines));
+      editor.dispatch({
+        selection: { anchor: target.from },
+        effects: EditorView.scrollIntoView(target.from, { y: "center" }),
+      });
+    }
     editor.focus();
     return () => {
       disposed = true;

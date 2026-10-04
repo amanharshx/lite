@@ -82,6 +82,7 @@ import {
   type DirectoryCursor,
   type DirectoryListing,
   type FileEntry,
+  type FileRequest,
   folderName,
   type GitStatus,
   providerLabel,
@@ -967,6 +968,7 @@ function FileViewer({
   saving,
   saveError,
   fontSize,
+  line,
   onBack,
   onOpenPath,
   rootId,
@@ -982,6 +984,7 @@ function FileViewer({
   saving: boolean;
   saveError: string;
   fontSize: number;
+  line?: number;
   onBack: () => void;
   onOpenPath: (path: string) => void;
   rootId: string;
@@ -1091,6 +1094,7 @@ function FileViewer({
                 baseline={baseline ?? undefined}
                 editable
                 fontSize={fontSize}
+                line={line}
                 onChange={(contents) => {
                   onDraftChange(lineEnding === "\r\n" ? contents.replace(/\r?\n/g, "\r\n") : contents);
                   if (!saveError) void onSave();
@@ -1155,6 +1159,8 @@ function FilesPanel({
   sessionId,
   fontSize,
   fileBrowserVersion,
+  openRequest,
+  onOpened,
   searchRef,
   onLoad,
 }: {
@@ -1163,6 +1169,8 @@ function FilesPanel({
   sessionId: string;
   fontSize: number;
   fileBrowserVersion: number;
+  openRequest?: FileRequest;
+  onOpened: () => void;
   searchRef: Ref<HTMLInputElement>;
   onLoad: (tab: InspectorTab) => void;
 }) {
@@ -1180,12 +1188,14 @@ function FilesPanel({
   const [saving, setSaving] = useState(Boolean(cached?.saving));
   const [saveError, setSaveError] = useState(cached?.saveError ?? "");
   const [query, setQuery] = useState("");
+  const [line, setLine] = useState<number>();
   const request = useRef(0);
 
   const openFile = useCallback(
-    async (entry: FileEntry) => {
+    async (entry: FileEntry, line?: number) => {
       const id = ++request.current;
       setSelected(entry);
+      setLine(line);
       setSource("");
       setDraft("");
       setBaseline(null);
@@ -1230,6 +1240,17 @@ function FilesPanel({
       request.current++;
     };
   }, [cached, openFile]);
+
+  // A path clicked in the terminal opens like one clicked in the tree, but never over unsaved edits. A
+  // relative path is read from the session's folder.
+  useEffect(() => {
+    if (!openRequest) return;
+    const path = /^[/\\]|^[A-Za-z]:/.test(openRequest.path) ? openRequest.path : `${root}/${openRequest.path}`;
+    if (draft !== source || saving)
+      toast.add({ title: "Save or discard the open file first", description: path, type: "error" });
+    else void openFile({ name: folderName(path), path, isDirectory: false, isSymlink: false }, openRequest.line);
+    onOpened();
+  }, [openRequest, root, draft, source, saving, openFile, onOpened]);
 
   async function saveFile() {
     const editor = fileEditorsBySession.get(sessionId);
@@ -1285,7 +1306,7 @@ function FilesPanel({
     <div className="flex h-full min-h-0 flex-col">
       {selected ? (
         <FileViewer
-          key={selected.path}
+          key={`${selected.path}:${request.current}`}
           entry={selected}
           source={source}
           draft={draft}
@@ -1295,6 +1316,7 @@ function FilesPanel({
           saving={saving}
           saveError={saveError}
           fontSize={fontSize}
+          line={line}
           onBack={closeFile}
           onOpenPath={(path) => void openFile({ name: folderName(path), path, isDirectory: false, isSymlink: false })}
           rootId={rootId}
@@ -2177,6 +2199,8 @@ export const Inspector = memo(function Inspector({
   remote,
   fontSize,
   fileBrowserVersion,
+  openRequest,
+  onOpened,
   collapsed,
   onExpand,
   onCollapse,
@@ -2185,6 +2209,8 @@ export const Inspector = memo(function Inspector({
   remote: string;
   fontSize: number;
   fileBrowserVersion: number;
+  openRequest?: FileRequest;
+  onOpened: () => void;
   collapsed: boolean;
   onExpand: () => void;
   onCollapse: () => void;
@@ -2207,13 +2233,24 @@ export const Inspector = memo(function Inspector({
     setReload((counts) => ({ ...counts, [value]: counts[value] + 1 }));
   }
 
-  function selectTab(value: string) {
-    const next = value as InspectorTab;
+  const showTab = useCallback((next: InspectorTab) => {
     inspectorTab = next;
     setTab(next);
     setVisited((current) => including(current, next));
+  }, []);
+
+  function selectTab(value: string) {
+    const next = value as InspectorTab;
+    showTab(next);
     if (next !== "git") refreshTab(next);
   }
+
+  // Showing Files without a refresh: a refresh remounts the panel and would drop the file being opened.
+  useEffect(() => {
+    if (!openRequest) return;
+    showTab("files");
+    if (collapsed) onExpand();
+  }, [openRequest, collapsed, onExpand, showTab]);
 
   // Collapsed, the panel is the strip of tabs it collapsed from: the one you pick is the one it reopens
   // on. Returning to a tab reads its current state without polling while it is hidden.
@@ -2319,6 +2356,8 @@ export const Inspector = memo(function Inspector({
                 sessionId={session.id}
                 fontSize={fontSize}
                 fileBrowserVersion={fileBrowserVersion}
+                openRequest={openRequest}
+                onOpened={onOpened}
                 searchRef={fileSearch}
                 onLoad={finishRefresh}
               />
