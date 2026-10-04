@@ -143,7 +143,7 @@ function wordCells(buffer: IBuffer, row: number, indent: number) {
     let x = from;
     while (x < line.length && (line.getCell(x)?.getWidth() === 0 || /\S/.test(line.getCell(x)?.getChars() ?? ""))) x++;
     total += x - from;
-    if (x < line.length || !buffer.getLine(row + 1)?.isWrapped) break;
+    if (x < line.length || row + 1 >= buffer.length || !buffer.getLine(row + 1)?.isWrapped) break;
   }
   return total;
 }
@@ -153,8 +153,9 @@ function wordCells(buffer: IBuffer, row: number, indent: number) {
 // path. An app cuts there only because the next word would not fit, so a short row at the same indent,
 // as in a list of folders, is never joined.
 function continues(buffer: IBuffer, row: number) {
+  // The buffer is a ring: past its last row, getLine wraps around to the first.
   const line = buffer.getLine(row);
-  if (!line || row === 0) return false;
+  if (!line || row === 0 || row >= buffer.length) return false;
   if (line.isWrapped) return true;
   const prev = buffer.getLine(row - 1);
   if (!CUT_REST.test(line.translateToString(true)) || !CUT_END.test(prev?.translateToString(true) ?? "")) return false;
