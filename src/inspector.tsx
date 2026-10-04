@@ -1241,18 +1241,16 @@ function FilesPanel({
     };
   }, [cached, openFile]);
 
-  // A path clicked in the terminal opens like one clicked in the tree, but never over unsaved edits.
+  // A path clicked in the terminal opens like one clicked in the tree, but never over unsaved edits. A
+  // relative path is read from the session's folder.
   useEffect(() => {
     if (!openRequest) return;
+    const path = /^[/\\]|^[A-Za-z]:/.test(openRequest.path) ? openRequest.path : `${root}/${openRequest.path}`;
     if (draft !== source || saving)
-      toast.add({ title: "Save or discard the open file first", description: openRequest.path, type: "error" });
-    else
-      void openFile(
-        { name: folderName(openRequest.path), path: openRequest.path, isDirectory: false, isSymlink: false },
-        openRequest.line,
-      );
+      toast.add({ title: "Save or discard the open file first", description: path, type: "error" });
+    else void openFile({ name: folderName(path), path, isDirectory: false, isSymlink: false }, openRequest.line);
     onOpened();
-  }, [openRequest, draft, source, saving, openFile, onOpened]);
+  }, [openRequest, root, draft, source, saving, openFile, onOpened]);
 
   async function saveFile() {
     const editor = fileEditorsBySession.get(sessionId);

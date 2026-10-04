@@ -1598,8 +1598,8 @@ function App() {
   const [settingsTab, setSettingsTab] = useState<string>();
   const [fileBrowserVersion, setFileBrowserVersion] = useState(0);
   // A path clicked in a terminal, held until the inspector's file editor takes it.
-  const [fileRequest, setFileRequest] = useState<(FileRequest & { sessionId: string }) | null>(null);
-  const clearFileRequest = useCallback(() => setFileRequest(null), []);
+  const [fileRequest, setFileRequest] = useState<FileRequest>();
+  const clearFileRequest = useCallback(() => setFileRequest(undefined), []);
   const [notifications, setNotifications] = useState(() => localStorage.getItem(NOTIFICATIONS_KEY) !== "false");
   const [keepAwake, setKeepAwake] = useState(() => localStorage.getItem(KEEP_AWAKE_KEY) === "true");
   const [remoteSsh, setRemoteSsh] = useState(() => localStorage.getItem(REMOTE_SSH_KEY) === "true");
@@ -3411,13 +3411,7 @@ function App() {
                               onOutput={(output, terminalStream) =>
                                 rememberGitHubReferences(session.id, output, terminalStream)
                               }
-                              onOpenFile={(path, line) =>
-                                setFileRequest({
-                                  sessionId: session.id,
-                                  path: /^[/\\]|^[A-Za-z]:/.test(path) ? path : `${session.cwd}/${path}`,
-                                  line,
-                                })
-                              }
+                              onOpenFile={setFileRequest}
                               onRecover={() => recoverSession(session)}
                               onPrompt={(text) => {
                                 const agent = session.agent === "shell" ? commandAgent(text) : undefined;
@@ -3553,7 +3547,7 @@ function App() {
                         remote={remote}
                         fontSize={inspectorFontSize}
                         fileBrowserVersion={fileBrowserVersion}
-                        openRequest={fileRequest?.sessionId === selected.id ? fileRequest : undefined}
+                        openRequest={fileRequest}
                         onOpened={clearFileRequest}
                         collapsed={shut.inspector}
                         onExpand={expandInspector}

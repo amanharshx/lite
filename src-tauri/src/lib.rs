@@ -1163,10 +1163,6 @@ fn ssh_text(root: &SshRoot, script: &str) -> Result<String, String> {
         .map_err(|_| "SSH command returned non-UTF-8 text".into())
 }
 
-fn outside_folder(path: &str, root: &str) -> String {
-    format!("{path} is outside this session's folder, {root}. Start a session there to open it.")
-}
-
 fn remote_path(root: &SshRoot, path: &str) -> Result<String, String> {
     let root_path = if root.path == "/" {
         "/"
@@ -1184,7 +1180,7 @@ fn remote_path(root: &SshRoot, path: &str) -> Result<String, String> {
     if path == root_path || path.starts_with(&format!("{root_path}/")) {
         Ok(path.to_owned())
     } else {
-        Err(outside_folder(path, root_path))
+        Err("Path is outside the selected folder".into())
     }
 }
 
@@ -1201,7 +1197,7 @@ fn ssh_scope_guard(root: &str, variable: &str, message: &str) -> String {
 
 fn scoped_ssh_script(root: &SshRoot, path: &str, command: &str) -> Result<String, String> {
     let path = remote_path(root, path)?;
-    let scope = ssh_scope_guard(&root.path, "path", &outside_folder("That file", &root.path));
+    let scope = ssh_scope_guard(&root.path, "path", "Path is outside the selected folder");
     Ok(format!(
         "path=$(realpath -- {}) || exit; {scope}{command}",
         posix_quote(&path)
@@ -1213,10 +1209,7 @@ fn scoped_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     if path.starts_with(root) {
         Ok(path)
     } else {
-        Err(outside_folder(
-            &path.display().to_string(),
-            &root.display().to_string(),
-        ))
+        Err("Path is outside the selected folder".into())
     }
 }
 
