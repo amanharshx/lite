@@ -1584,6 +1584,11 @@ fn ssh_native_session_state(
             "home=${{{variable}:-$HOME/{fallback}}}; find \"$home/projects\" -type f -path {} -print -quit 2>/dev/null | grep -q . && printf 1 || printf 0",
             posix_quote(&format!("*/chats/{id}.jsonl")),
         ),
+        // A rollout holds a conversation once a turn starts, or in older ones, once the assistant replies.
+        "codex" => format!(
+            "home=${{{variable}:-$HOME/{fallback}}}; file=$(find \"$home/sessions\" -type f -name {} -print -quit 2>/dev/null); test -n \"$file\" && grep -m 1 -E -q '\"type\":\"turn_context\"|\"role\":\"assistant\"' \"$file\" && printf 1 || printf 0",
+            posix_quote(&format!("rollout-*-{id}.jsonl")),
+        ),
         _ => return Ok(RemoteSessionState::Missing),
     };
     match ssh_text(root, &script)?.as_str() {
@@ -3278,6 +3283,51 @@ fn codex_thread_resumable(server: &CodexServer, thread_id: &str) -> Result<bool,
     })
 }
 
+// The saved conversation a fork of this tab copies, checked before the fork's tab exists. Codex names
+// a thread before its first message but saves nothing to fork until then.
+#[tauri::command]
+async fn fork_source(
+    app: AppHandle,
+    session_id: String,
+    agent: String,
+    root_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let remote = ssh_root(&app.state::<Roots>(), &root_id)?;
+        let known = app
+            .state::<ProviderSessions>()
+            .0
+            .lock()
+            .map_err(|error| error.to_string())?
+            .get(&session_id)
+            .cloned();
+        let saved = match (agent.as_str(), remote) {
+            ("claude", None) => {
+                let (id, saved) = claude_launch_id(&app, known.as_deref().unwrap_or(&session_id));
+                saved.then_some(id)
+            }
+            ("claude" | "codex", Some(root)) => {
+                let id = known.unwrap_or(session_id);
+                matches!(
+                    ssh_native_session_state(&root, &agent, &id)?,
+                    RemoteSessionState::Ready
+                )
+                .then_some(id)
+            }
+            ("codex", None) => match known {
+                Some(thread) if codex_thread_resumable(&app.state::<CodexServer>(), &thread)? => {
+                    Some(thread)
+                }
+                _ => None,
+            },
+            _ => return Err("This session's CLI cannot fork a conversation.".into()),
+        };
+        saved.ok_or_else(|| "This session has no conversation to fork yet.".into())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn stop_codex_server(server: &CodexServer) {
     let Ok(mut server) = server.0.lock() else {
         return;
@@ -3801,12 +3851,21 @@ fn agent_builder(agent: &str) -> Result<CommandBuilder, String> {
     Ok(CommandBuilder::new(path))
 }
 
-fn session_arguments(
-    agent: &str,
-    resume: bool,
-    session_id: &str,
-    provider_session_id: Option<&str>,
-) -> Result<Vec<String>, String> {
+fn session_arguments(launch: &SessionCommand<'_>) -> Result<Vec<String>, String> {
+    let SessionCommand {
+        agent,
+        resume,
+        session_id,
+        provider_session_id,
+        fork,
+        ..
+    } = *launch;
+    // A fork copies a saved conversation and then starts as a new one would.
+    let fork = match (agent, fork) {
+        ("claude", Some(parent)) => vec!["--resume".into(), parent.into(), "--fork-session".into()],
+        ("codex", Some(parent)) => vec!["fork".into(), parent.into()],
+        _ => Vec::new(),
+    };
     match agent {
         "claude" => Ok(vec![
             if resume { "--resume" } else { "--session-id" }.into(),
@@ -3816,12 +3875,16 @@ fn session_arguments(
             if resume { "--resume" } else { "--session-id" }.into(),
             session_id.into(),
         ]),
+        "codex" => Ok(provider_session_id
+            .map(|id| vec!["resume".into(), id.into()])
+            .unwrap_or_default()),
         "kimi" => Ok(provider_session_id
             .map(|id| vec!["--session".into(), id.into()])
             .unwrap_or_default()),
         "shell" => Ok(Vec::new()),
         _ => Err("Unknown session type".into()),
     }
+    .map(|arguments| [fork, arguments].concat())
 }
 
 // Flags the user typed for a session, split as a shell would. A flag that takes control of which
@@ -3912,12 +3975,6 @@ fn session_flags(agent: &str, flags: Option<&str>) -> Result<Vec<String>, String
 #[tauri::command]
 fn check_session_flags(agent: String, flags: String) -> Result<(), String> {
     session_flags(&agent, Some(&flags)).map(drop)
-}
-
-fn codex_resume_arguments(provider_session_id: Option<&str>) -> Vec<String> {
-    provider_session_id
-        .map(|id| vec!["resume".into(), id.into()])
-        .unwrap_or_default()
 }
 
 fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
@@ -4157,6 +4214,7 @@ struct SessionCommand<'a> {
     resume: bool,
     session_id: &'a str,
     provider_session_id: Option<&'a str>,
+    fork: Option<&'a str>,
 }
 
 fn agent_command(app: &AppHandle, launch: &SessionCommand<'_>) -> Result<CommandBuilder, String> {
@@ -4164,20 +4222,13 @@ fn agent_command(app: &AppHandle, launch: &SessionCommand<'_>) -> Result<Command
     let provider = launch.provider;
     let model = launch.model;
     let reasoning_effort = launch.reasoning_effort;
-    let resume = launch.resume;
     let session_id = launch.session_id;
-    let provider_session_id = launch.provider_session_id;
     let mut command = match agent {
         "claude" | "gemini" | "kimi" | "qwen" => {
             let mut command = agent_builder(agent)?;
             // Kimi only resumes an exact id: `--continue` would make two tabs in one directory share
             // its latest session and leave neither able to discover which session it is showing.
-            command.args(session_arguments(
-                agent,
-                resume,
-                session_id,
-                provider_session_id,
-            )?);
+            command.args(session_arguments(launch)?);
             command
         }
         "codex" => {
@@ -4266,7 +4317,7 @@ fn agent_command(app: &AppHandle, launch: &SessionCommand<'_>) -> Result<Command
                     ]);
                 }
             }
-            command.args(codex_resume_arguments(provider_session_id));
+            command.args(session_arguments(launch)?);
             command
         }
         "shell" => {
@@ -4767,14 +4818,9 @@ fn ssh_session_command(
                 );
             }
             args.extend(CODEX_NOTIFICATION_ARGS.map(str::to_owned));
-            args.extend(codex_resume_arguments(launch.provider_session_id));
+            args.extend(session_arguments(launch)?);
         } else {
-            args.extend(session_arguments(
-                launch.agent,
-                launch.resume,
-                launch.session_id,
-                launch.provider_session_id,
-            )?);
+            args.extend(session_arguments(launch)?);
             if launch.agent == "claude" {
                 args.extend([
                     "--settings".into(),
@@ -4829,6 +4875,8 @@ struct SessionLaunch {
     initial_prompt: Option<String>,
     theme: Option<String>,
     resume: bool,
+    // The conversation `fork_source` found for this new session to copy.
+    fork: Option<String>,
     cols: u16,
     rows: u16,
 }
@@ -4859,6 +4907,7 @@ async fn spawn_session(
         initial_prompt,
         theme,
         resume,
+        fork,
         cols,
         rows,
     } = launch;
@@ -5072,6 +5121,7 @@ async fn spawn_session(
         resume,
         session_id: &session_id,
         provider_session_id: provider_session_id.as_deref(),
+        fork: fork.as_deref(),
     };
     let mut command = if let Some(root) = ssh.as_ref() {
         ssh_session_command(root, &launch, initial_prompt.as_deref())?
@@ -7677,6 +7727,7 @@ pub fn run() {
             spawn_session,
             codex_pickers,
             record_codex_session,
+            fork_source,
             write_session,
             watch_shell_agent,
             resize_session,

@@ -18,6 +18,7 @@ import {
   ExternalLink,
   Folder,
   GitBranch,
+  GitFork,
   Link,
   Moon,
   Pencil,
@@ -482,6 +483,7 @@ function AppContextMenu({
   startingIds,
   onSelectSession,
   onRenameSession,
+  onForkSession,
   onRestartSession,
   onCloseSession,
   onRestartAll,
@@ -493,6 +495,7 @@ function AppContextMenu({
   startingIds: Set<string>;
   onSelectSession: (session: Session) => void;
   onRenameSession: (session: Session) => void;
+  onForkSession: (session: Session) => void;
   onRestartSession: (session: Session) => void;
   onCloseSession: (session: Session) => void;
   onRestartAll: () => void;
@@ -544,6 +547,12 @@ function AppContextMenu({
               <Pencil />
               Rename
             </ContextMenuItem>
+            {!session.mode && !session.worktree && (session.agent === "claude" || session.agent === "codex") ? (
+              <ContextMenuItem onClick={() => onForkSession(session)}>
+                <GitFork />
+                Fork
+              </ContextMenuItem>
+            ) : null}
             <ContextMenuItem onClick={() => writeClipboard(session.cwd)}>
               <Copy />
               Copy path
@@ -2272,7 +2281,7 @@ function App() {
     setRemoteSsh(enabled);
   }, []);
 
-  const launch = useCallback(async (session: Session, resume: boolean, initialPrompt?: string) => {
+  const launch = useCallback(async (session: Session, resume: boolean, initialPrompt?: string, fork?: string) => {
     if (runs.current.has(session.id)) return true;
     recoveryFailures.current.delete(session.id);
     const runId = crypto.randomUUID();
@@ -2311,6 +2320,7 @@ function App() {
           initialPrompt: initialPrompt ?? null,
           theme: themeRef.current,
           resume,
+          fork,
           cols: 100,
           rows: 30,
         },
@@ -2468,14 +2478,38 @@ function App() {
     }
   }
 
-  function createSession(session: Session) {
+  function createSession(session: Session, fork?: string) {
     session = { ...session, createdAt: session.createdAt ?? Date.now() };
     resumed.current = session.id;
     setRecentFolders((folders) => rememberFolder(folders, session));
     recentSessions.current = [session.id, ...recentSessions.current];
     setSessions((current) => [session, ...current]);
     setSelectedId(session.id);
-    void launch(session, false);
+    void launch(session, false, undefined, fork);
+  }
+
+  // A fork continues a copy of the conversation in the same folder under its own folder grant, so
+  // closing either tab leaves the other's access in place.
+  async function forkSession(session: Session) {
+    const source = await invoke<string>("fork_source", {
+      sessionId: session.id,
+      agent: session.agent,
+      rootId: session.rootId,
+    }).catch((reason) => void setError(String(reason)));
+    if (!source) return;
+    createSession(
+      {
+        ...session,
+        id: crypto.randomUUID(),
+        createdAt: undefined,
+        rootId: crypto.randomUUID(),
+        name: `${session.name} (fork)`,
+        renamed: true,
+        running: false,
+        providerSessionId: undefined,
+      },
+      source,
+    );
   }
 
   function reorderSession(draggedId: string, targetId: string, after: boolean) {
@@ -3055,6 +3089,7 @@ function App() {
           setRenamingId(session.id);
           if (shut.sidebar) glide(sidebarPanel.current, share(sidebarPanel.current, SIDES.sidebar.size));
         }}
+        onForkSession={(session) => void forkSession(session)}
         onRestartSession={(session) => void restartSession(session)}
         onCloseSession={closeSession}
         onRestartAll={restartAllSessions}
