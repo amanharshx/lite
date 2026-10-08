@@ -550,17 +550,17 @@ function AppContextMenu({
               <Pencil />
               Rename
             </ContextMenuItem>
+            <ContextMenuItem onClick={() => writeClipboard(session.cwd)}>
+              <Copy />
+              Copy path
+            </ContextMenuItem>
+            <ContextMenuSeparator />
             {!session.mode && !session.worktree && (session.agent === "claude" || session.agent === "codex") ? (
               <ContextMenuItem onClick={() => onForkSession(session)}>
                 <GitFork />
                 Fork
               </ContextMenuItem>
             ) : null}
-            <ContextMenuItem onClick={() => writeClipboard(session.cwd)}>
-              <Copy />
-              Copy path
-            </ContextMenuItem>
-            <ContextMenuSeparator />
             {session.archivedAt ? null : (
               <ContextMenuItem disabled={startingIds.has(session.id)} onClick={() => onRestartSession(session)}>
                 <RotateCcw />
