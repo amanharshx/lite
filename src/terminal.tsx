@@ -146,18 +146,6 @@ function fileLinks(terminal: Terminal, y: number, open: (file: Pick<FileEntry, "
     }));
 }
 
-// A terminal carries no image, so a clipboard without text gets Control+V, which Claude Code and Codex
-// take as the cue to read a copied image from the clipboard themselves. The target is looked up once the
-// read finishes, so a paste whose session left view in the meantime is dropped.
-export async function pasteClipboard(read: Promise<string>, target: () => Terminal | null) {
-  const text = await read;
-  const terminal = target();
-  if (!terminal) return;
-  if (text) terminal.paste(text);
-  else terminal.input("\x16");
-  terminal.focus();
-}
-
 const FONT_FAMILY = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 
 export function TerminalView({
@@ -381,6 +369,15 @@ export function TerminalView({
         })
         .catch((reason) => console.error("Lite could not paste the dropped files:", reason));
     });
+    // Text stays with xterm's paste handler. Only image clipboard events ask the CLI to attach it.
+    const paste = (event: ClipboardEvent) => {
+      const data = event.clipboardData;
+      if (!data || data.getData("text/plain")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (Array.from(data.items).some((item) => item.type.startsWith("image/"))) terminal.input("\x16");
+    };
+    terminal.element?.addEventListener("paste", paste, true);
     // Command and the zoom keys resize the type, as they do in a terminal app.
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
@@ -441,6 +438,7 @@ export function TerminalView({
       unsubscribe();
       parsed.dispose();
       disconnectTerminalOutput();
+      terminal.element?.removeEventListener("paste", paste, true);
       terminal.dispose();
       terminalRef.current = null;
       searchAddonRef.current = null;
@@ -532,13 +530,6 @@ export function TerminalView({
     } else setSearchOpen(true);
   }
 
-  function paste() {
-    const read = IS_MAC ? invoke<string>("read_clipboard") : navigator.clipboard.readText();
-    void pasteClipboard(read, () => (activeRef.current ? terminalRef.current : null)).catch((reason) =>
-      console.error("Lite could not paste:", reason),
-    );
-  }
-
   function scrollToBottom() {
     terminalRef.current?.scrollToBottom();
     terminalRef.current?.focus();
@@ -581,7 +572,20 @@ export function TerminalView({
       <button type="button" hidden data-context-zoom-in onClick={() => zoomRef.current(1)} />
       <button type="button" hidden data-context-zoom-out onClick={() => zoomRef.current(-1)} />
       <button type="button" hidden data-context-zoom-reset onClick={() => zoomRef.current(0)} />
-      <button type="button" hidden data-context-paste onClick={paste} />
+      <button
+        type="button"
+        hidden
+        data-context-paste
+        onClick={() => {
+          const terminal = terminalRef.current;
+          terminal?.focus();
+          void invoke<boolean>("paste_clipboard")
+            .then((image) => {
+              if (image) terminal?.input("\x16");
+            })
+            .catch((reason) => console.error("Lite could not paste:", reason));
+        }}
+      />
       <button type="button" hidden data-terminal-search onClick={openSearch} />
       <button type="button" hidden data-terminal-scroll-bottom onClick={scrollToBottom} />
       {searchOpen ? (
