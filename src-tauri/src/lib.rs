@@ -7625,7 +7625,7 @@ fn startup_ready(app: AppHandle) {
     }
 }
 
-// Clipboard writes stay synchronous because AppKit pasteboard access belongs on the main thread.
+// Clipboard access stays synchronous because AppKit pasteboard access belongs on the main thread.
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn write_clipboard(text: String) -> Result<(), String> {
@@ -7637,6 +7637,18 @@ fn write_clipboard(text: String) -> Result<(), String> {
         .setString_forType(&NSString::from_str(&text), text_type)
         .then_some(())
         .ok_or("Could not write to the clipboard".into())
+}
+
+// The webview's own clipboard read makes the user confirm with a second Paste button.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn read_clipboard() -> String {
+    // SAFETY: AppKit owns this immutable process-lifetime constant.
+    let text_type = unsafe { NSPasteboardTypeString };
+    NSPasteboard::generalPasteboard()
+        .stringForType(text_type)
+        .map(|text| text.to_string())
+        .unwrap_or_default()
 }
 
 // Tauri fills the About panel from the bundle config, which reaches it with only a name and version,
@@ -7714,6 +7726,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             #[cfg(target_os = "macos")]
             write_clipboard,
+            #[cfg(target_os = "macos")]
+            read_clipboard,
             set_attention_badge,
             quote_dropped_paths,
             check_session_flags,

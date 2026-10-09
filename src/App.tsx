@@ -353,6 +353,7 @@ type AppMenuContext = {
   expandPanel: HTMLButtonElement | null;
   expandSessions: HTMLButtonElement | null;
   newSession: HTMLButtonElement | null;
+  paste: HTMLButtonElement | null;
   refresh: HTMLButtonElement | null;
   revert: HTMLButtonElement | null;
   selectedText: string;
@@ -376,6 +377,7 @@ const EMPTY_MENU_CONTEXT: AppMenuContext = {
   expandPanel: null,
   expandSessions: null,
   newSession: null,
+  paste: null,
   refresh: null,
   revert: null,
   selectedText: "",
@@ -426,6 +428,7 @@ function menuContext(target: EventTarget | null): AppMenuContext {
     expandPanel: surface?.querySelector<HTMLButtonElement>("[data-context-expand-panel]") ?? null,
     expandSessions: surface?.querySelector<HTMLButtonElement>("[data-context-expand-sessions]") ?? null,
     newSession: surface?.querySelector<HTMLButtonElement>("[data-context-new-session]") ?? null,
+    paste: zoom?.querySelector<HTMLButtonElement>("[data-context-paste]") ?? null,
     refresh: surface?.querySelector<HTMLButtonElement>("[data-context-refresh]") ?? null,
     revert: null,
     selectedText,
@@ -518,7 +521,7 @@ function AppContextMenu({
     context.expandFiles || context.expandPanel || context.expandSessions,
     context.newSession || context.refresh,
   ].some(Boolean);
-  const editGroup = Boolean(context.editable || context.selectedText);
+  const editGroup = Boolean(context.editable || context.selectedText || context.paste);
   const sessionsGroup = Boolean(session || context.newSession);
   return (
     <ContextMenu
@@ -724,13 +727,24 @@ function AppContextMenu({
               <ContextMenuShortcut>{shortcut}A</ContextMenuShortcut>
             </ContextMenuItem>
           </>
-        ) : context.selectedText ? (
-          <ContextMenuItem onClick={() => writeClipboard(context.selectedText)}>
-            <Copy />
-            Copy
-            <ContextMenuShortcut>{shortcut}C</ContextMenuShortcut>
-          </ContextMenuItem>
-        ) : null}
+        ) : (
+          <>
+            {context.selectedText ? (
+              <ContextMenuItem onClick={() => writeClipboard(context.selectedText)}>
+                <Copy />
+                Copy
+                <ContextMenuShortcut>{shortcut}C</ContextMenuShortcut>
+              </ContextMenuItem>
+            ) : null}
+            {context.paste ? (
+              <ContextMenuItem onClick={() => context.paste?.click()}>
+                <ClipboardPaste />
+                Paste
+                <ContextMenuShortcut>{shortcut}V</ContextMenuShortcut>
+              </ContextMenuItem>
+            ) : null}
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

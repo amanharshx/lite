@@ -520,6 +520,19 @@ export function TerminalView({
     } else setSearchOpen(true);
   }
 
+  // A terminal carries no image, so a clipboard without text gets Control+V, which Claude Code and
+  // Codex take as the cue to read a copied image from the clipboard themselves.
+  function paste() {
+    const read = navigator.platform.includes("Mac") ? invoke<string>("read_clipboard") : navigator.clipboard.readText();
+    void read
+      .then((text) => {
+        if (text) terminalRef.current?.paste(text);
+        else terminalRef.current?.input("\x16");
+        terminalRef.current?.focus();
+      })
+      .catch((reason) => console.error("Lite could not paste:", reason));
+  }
+
   function scrollToBottom() {
     terminalRef.current?.scrollToBottom();
     terminalRef.current?.focus();
@@ -562,6 +575,7 @@ export function TerminalView({
       <button type="button" hidden data-context-zoom-in onClick={() => zoomRef.current(1)} />
       <button type="button" hidden data-context-zoom-out onClick={() => zoomRef.current(-1)} />
       <button type="button" hidden data-context-zoom-reset onClick={() => zoomRef.current(0)} />
+      <button type="button" hidden data-context-paste onClick={paste} />
       <button type="button" hidden data-terminal-search onClick={openSearch} />
       <button type="button" hidden data-terminal-scroll-bottom onClick={scrollToBottom} />
       {searchOpen ? (
