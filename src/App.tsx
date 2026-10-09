@@ -467,10 +467,12 @@ function edit(context: AppMenuContext, command: "cut" | "paste" | "selectAll") {
   const element = context.editable;
   if (!element) return;
   element.focus();
-  if (document.execCommand(command)) return;
-  if (command !== "paste") return;
-  void navigator.clipboard
-    .readText()
+  // The webview's own paste makes the user confirm with a second Paste button on macOS.
+  if (command !== "paste") {
+    document.execCommand(command);
+    return;
+  }
+  void (IS_MAC ? invoke<string>("read_clipboard") : navigator.clipboard.readText())
     .then((text) => {
       if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
         element.setRangeText(text, element.selectionStart ?? 0, element.selectionEnd ?? 0, "end");

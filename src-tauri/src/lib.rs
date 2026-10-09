@@ -7712,6 +7712,17 @@ pub fn run() {
         .manage(Installer::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Linux and Windows let the page read the clipboard only when the webview opts in, which
+            // the config cannot express, so the main window is built here. macOS uses `read_clipboard`.
+            let main = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main");
+            tauri::WebviewWindowBuilder::from_config(app.handle(), main.ok_or("No main window")?)?
+                .enable_clipboard_access()
+                .build()?;
             app.manage(load_roots(app.handle()));
             app.manage(load_provider_sessions(app.handle()));
             app.manage(load_codex_server(app.handle())?);

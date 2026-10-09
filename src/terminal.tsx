@@ -146,6 +146,18 @@ function fileLinks(terminal: Terminal, y: number, open: (file: Pick<FileEntry, "
     }));
 }
 
+// A terminal carries no image, so a clipboard without text gets Control+V, which Claude Code and Codex
+// take as the cue to read a copied image from the clipboard themselves. The target is looked up once the
+// read finishes, so a paste whose session left view in the meantime is dropped.
+export async function pasteClipboard(read: Promise<string>, target: () => Terminal | null) {
+  const text = await read;
+  const terminal = target();
+  if (!terminal) return;
+  if (text) terminal.paste(text);
+  else terminal.input("\x16");
+  terminal.focus();
+}
+
 const FONT_FAMILY = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 
 export function TerminalView({
@@ -520,17 +532,11 @@ export function TerminalView({
     } else setSearchOpen(true);
   }
 
-  // A terminal carries no image, so a clipboard without text gets Control+V, which Claude Code and
-  // Codex take as the cue to read a copied image from the clipboard themselves.
   function paste() {
     const read = IS_MAC ? invoke<string>("read_clipboard") : navigator.clipboard.readText();
-    void read
-      .then((text) => {
-        if (text) terminalRef.current?.paste(text);
-        else terminalRef.current?.input("\x16");
-        terminalRef.current?.focus();
-      })
-      .catch((reason) => console.error("Lite could not paste:", reason));
+    void pasteClipboard(read, () => (activeRef.current ? terminalRef.current : null)).catch((reason) =>
+      console.error("Lite could not paste:", reason),
+    );
   }
 
   function scrollToBottom() {
