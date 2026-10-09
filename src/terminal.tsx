@@ -523,7 +523,7 @@ export function TerminalView({
   // A terminal carries no image, so a clipboard without text gets Control+V, which Claude Code and
   // Codex take as the cue to read a copied image from the clipboard themselves.
   function paste() {
-    const read = navigator.platform.includes("Mac") ? invoke<string>("read_clipboard") : navigator.clipboard.readText();
+    const read = IS_MAC ? invoke<string>("read_clipboard") : navigator.clipboard.readText();
     void read
       .then((text) => {
         if (text) terminalRef.current?.paste(text);

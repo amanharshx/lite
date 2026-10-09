@@ -7625,7 +7625,7 @@ fn startup_ready(app: AppHandle) {
     }
 }
 
-// Clipboard access stays synchronous because AppKit pasteboard access belongs on the main thread.
+// Clipboard writes stay synchronous because AppKit pasteboard access belongs on the main thread.
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn write_clipboard(text: String) -> Result<(), String> {
